@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "espn-ff-assistant"
+version = "0.1.0"
+description = "ESPN fantasy-football persistence and manager-analytics foundation"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "espn-api>=0.45,<1",
+  "psycopg[binary]>=3.2,<4",
+  "python-dotenv>=1,<2",
+  "requests>=2.32,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<10",
+  "ruff>=0.11,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/espn_ff_assistant"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "integration: makes read-only requests to ESPN using local credentials",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]

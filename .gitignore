@@ -1,0 +1,36 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ESPN responses and derived datasets may contain private league/member data
+data/raw/**
+!data/raw/.gitkeep
+data/derived/**
+!data/derived/.gitkeep
+
+# Generated reports
+reports/coverage.csv
+reports/coverage.json
+reports/verification.local.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+.uv-cache/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
