@@ -143,9 +143,17 @@ after League A has a measured recommendation loop.
 
 ## Current implementation checkpoint
 
-The first raw scan is loaded into Supabase: 14 seasons, 2,536 roster snapshots,
-38,346 roster entries, 2,454 draft picks, 5,772 transactions, and 9,914
-transaction items. Raw manifest references and hashes are also persisted. The
-`matchups` table is intentionally empty because the archived `mSchedule` response
-shape did not contain usable matchup rows; matchup endpoint investigation is the
-next data task before performance features are built.
+_Updated September 27, 2026._
+
+- **Loaded data:** all 14 seasons in Supabase, including 1,333 matchups.
+- **Manager features:** attributed by team; FAAB reconciles with SQL.
+- **Deterministic recommendations:** a start/sit and waiver loop (Phases 5–6
+  plus lineup) runs from the CLI.
+  - Inputs: ESPN projections, a live free-agent pool, and the pro schedule.
+  - Every recommendation, including `NO_ACTION`, is persisted with evidence,
+    feedback, and outcomes.
+- **Backtests:** point-in-time backtests calibrate the lineup gate and the
+  FAAB rule.
+
+See `docs/recommendation-engine-handoff.md` §12 for status, findings, and
+next steps.

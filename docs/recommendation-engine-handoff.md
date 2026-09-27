@@ -638,11 +638,21 @@ measured outcomes. Do not build it in this plan.
 Verify each against a live or archived response, then record the answer in
 this file.
 
-1. `statSplitTypeId = 2` on season-level projections: is it rest-of-season?
-2. `kona_player_info` filter shape: does it return waivers and free agents
-   correctly, and which field holds the waiver clear time?
-3. Does `proTeamSchedules_wl` exist and return byes and kickoffs for 2026?
-4. Remaining FAAB per team: which `mTeam` field, if any?
+1. ~~`statSplitTypeId = 2`.~~ **Resolved (R1):** it is ESPN's *current*
+   full-season projection, i.e. actual to date plus the rest-of-season
+   projection. Rest-of-season = split-2 projected − season actual total.
+   That gives about 13.7 per-week projections for rostered players with 14
+   games left. Split 0 (source 1) is the preseason projection.
+2. ~~`kona_player_info` filter.~~ **Resolved (R1):** the filter in §3 works
+   (300 players, `status` of `FREEAGENT` or `WAIVERS`). The waiver clear
+   time is `waiverProcessDate` (ms) on the pool entry.
+3. ~~`proTeamSchedules_wl`.~~ **Resolved (R1):** it works at the season
+   (game-level) endpoint. It returns `settings.proTeams[]` with `byeWeek`
+   and `proGamesByScoringPeriod` (kickoff `date` in ms). ID 0 is the
+   free-agent pseudo-team.
+4. ~~Remaining FAAB.~~ **Resolved (R1):**
+   `mTeam.teams[].transactionCounter.acquisitionBudgetSpent`. The derived
+   `Repository.faab_remaining()` matches it for all 12 teams in 2026.
 5. ~~`FAILED_INVALIDPLAYERSOURCE` meaning.~~ **Resolved (R0):** it means
    outbid. 307 of 314 have an executed claim on the same player by another
    team within the same waiver run, always with a bid ≥ the failed bid.
@@ -654,7 +664,19 @@ this file.
    Claims are attributed by team. Also, 2018 had 137 transactions with the
    sentinel `teamId = -2147483648`. The normalizer now derives the acting
    team from the ADD item, and migration 009 backfilled the stored rows.
-7. League timezone for the waiver process hour.
+7. ~~League timezone.~~ **Not needed:** each waiver player's
+   `waiverProcessDate` gives the exact run time (e.g. Wednesday 03:00 ET).
+   It is stored as `player_status_snapshots.waiver_clear_at`.
+8. **New finding (R5): backfilled status is not point-in-time.** In
+   historical `mRoster` payloads, `injuryStatus` and `ownership` never
+   change within a season for any player (2018–2025). They are
+   end-of-season values. Weekly projections and actuals are per-period and
+   safe to use.
+   - Consequences: the lineup backtest ignores injury status, so the injury
+     multipliers are **not** calibrated.
+   - FAAB comparables use ownership only from live `-current` syncs
+     (`LIVE_RUN_SUFFIX`).
+   - Calibrating the injury multipliers needs a season of live syncs.
 
 ---
 
@@ -677,3 +699,75 @@ Every PR must meet these, per `AGENTS.md`:
 - Fixtures are synthetic.
 - Credentials and member IDs don't appear in logs or tracked files.
 - The code stays read-only against ESPN.
+
+---
+
+## 12. Implementation status (September 27, 2026)
+
+All six PRs are implemented on branch `recommendation-engine`. They are live
+against Supabase, and migrations 008–011 are applied.
+
+| Step | Where | State |
+|---|---|---|
+| R0 feature fixes | `manager_stats.py` v2, migrations 008–009, `validate_db.py` attribution check | Done; FAAB reconciles exactly |
+| R1 ingest | `sync.py`, `scripts/sync_current.py`, `loader.py` (`--only player_state`), `normalize/players.py`, migration 010 | Done; 186,665 historical stat rows backfilled; live sync takes about 50 s |
+| R2 lineup | `lineup.py` (Hungarian assignment over `eligibleSlots`) | Done; matches brute force on 500 random rosters |
+| R3 waivers | `waivers.py` | Done; FAAB rule set from the backtest |
+| R4 persistence | migration 011, repository recommendation/preference methods, `engine.py` | Done |
+| R5 outcomes and backtest | `evaluation.py`, `scripts/score_outcomes.py`, `scripts/backtest.py` | Done; report in `data/derived/recommendation-backtest.local.md` |
+| R6 CLI | `scripts/recommend.py` (`sync`, `whoami`, `lineup`, `waivers`, `scan`, `explain`, `feedback`, `prefs`) | Done |
+
+### Design changes from the plan
+
+- **Lineup optimizer is fully general.** It uses exact assignment over each
+  player's `eligibleSlots` instead of greedy. Superflex, OP, and IDP work, so
+  there is no unsupported-slot error. A slot with no startable player is
+  reported as `unfilled_slots`, not filled with an OUT or bye player.
+- **Stream drops.** For D/ST and K streams, the drop is chosen by next-week
+  gain, then rest-of-season, then the lowest rest-of-season player. That
+  keeps bench depth, because depth has no value in optimal-lineup terms.
+- **Recommendations must be jointly executable.** Each drop is used at most
+  once, and at most one stream per position is notified. Conflicting
+  options are stored as `suppressed` with reason
+  `conflicts_with_higher_ranked`.
+- **FAAB rule (data-driven, replaces the median × demand sketch).**
+  - With no rival need: bid the 25th percentile of prior winning bids at the
+    position.
+  - With a rival that needs the player and has budget: bid the 75th
+    percentile × (1 + 0.15 × (rivals − 1)).
+  - Streams always bid at the 25th percentile.
+  - Backtest, 2018–2025: 30% of claims were contested. Contested winners
+    paid a median $15.50, uncontested a median $5. The 75th percentile won
+    75% of contested runs (median overpay $9). The 25th percentile won 22%.
+- **The loader moved** into `src/espn_ff_assistant/loader.py`.
+  `scripts/load_run.py` is now a thin wrapper.
+
+### Backtest results (lineup, 2018–2025, 1,692 team-weeks)
+
+- The optimizer beat the lineup actually set by **+2.35 points per
+  team-week** on average. Mean projected gain was +2.38, so ESPN projections
+  are well calibrated for this purpose.
+- `NOTIFY_MIN_GAIN = 2.0` is supported: team-weeks with projected gain ≥ 2
+  realized **+8.7** on average and were positive 75% of the time. At ≥ 0.5
+  the rate was 63%.
+
+### Known gaps and next steps
+
+1. **Injury multipliers** (0.25 for doubtful, 0.85 for questionable) are
+   uncalibrated placeholders; see open question 8. Run
+   `recommend.py sync` at least daily in-season so live status accumulates.
+2. **Waiver notify thresholds are uncalibrated.** `NOTIFY_MIN_ROS = 10` and
+   `NOTIFY_MIN_NEXT = 3` need outcome data from `score_outcomes.py`.
+   Historical free-agent pools can't be recovered.
+3. **Rival need uses next-week starter floors only.** Competitor FAAB
+   aggression (`faab_bid_pct_of_remaining_*`) is computed but not yet used
+   in bids.
+4. **Bench value is zero** in optimal-lineup terms. Handcuff and injury
+   insurance value is only protected through the `stash_injured`
+   preference and `protected:<player_id>` preferences.
+5. **Scheduling (Phase 8).** Cadence is manual for now:
+   - `sync`, then `scan --save` the evening before each waiver run
+     (Tuesday and Friday), and before lineups lock;
+   - `score_outcomes.py` after Monday night.
+6. **The reasoning-orchestrator seam** is `payload.needs_review` on lineup
+   close calls (§9).
