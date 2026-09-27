@@ -48,21 +48,15 @@ def main() -> int:
             print(f"  {n} intervals inserted/updated.")
 
         print(f"Computing manager features as of {args.season} week {args.week}...", flush=True)
-        features = compute_all_features(repo, conn, league_id, args.season, args.week)
+        features = compute_all_features(repo, league_id, args.season, args.week)
         print(f"  {len(features)} feature rows computed.")
 
         # Group by manager for display
-        managers_meta = conn.execute(
-            """
-            SELECT DISTINCT m.id, m.display_name, m.provider_member_id
-            FROM managers m
-            JOIN team_owners to2 ON to2.manager_id=m.id
-            JOIN league_seasons ls ON ls.id=to2.league_season_id
-            WHERE ls.league_id=%s ORDER BY m.display_name
-            """,
-            (league_id,),
-        ).fetchall()
-        mgr_names = {str(r[0]): (r[1] or r[2] or str(r[0])) for r in managers_meta}
+        mgr_names = {
+            m.manager_id: m.display_name or m.provider_member_id or m.manager_id
+            for m in repo.league_managers(league_id)
+        }
+        shared = {f["manager_id"] for f in features if f.get("shared_team")}
 
         by_manager: dict[str, dict[str, float | None]] = {}
         by_manager_sample: dict[str, dict[str, int]] = {}
@@ -80,7 +74,7 @@ def main() -> int:
             if name_filter and name_filter not in name.lower():
                 continue
             print(f"\n{'='*60}")
-            print(f"  {name}")
+            print(f"  {name}" + ("  (co-owned team; team-level values)" if mid in shared else ""))
             print(f"{'='*60}")
             for stat, value in sorted(stats.items()):
                 n = by_manager_sample[mid].get(stat, 0)

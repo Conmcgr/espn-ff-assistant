@@ -11,6 +11,18 @@ from espn_ff_assistant.normalize.common import millis
 from espn_ff_assistant.transactions import category
 
 
+def _acting_team(tx: dict[str, Any]) -> int | None:
+    """ESPN sometimes sends a negative sentinel teamId; fall back to the team receiving an ADD."""
+    team_id = tx.get("teamId")
+    if isinstance(team_id, int) and team_id > 0:
+        return team_id
+    for item in tx.get("items") or []:
+        to_team = item.get("toTeamId")
+        if item.get("type") == "ADD" and isinstance(to_team, int) and to_team > 0:
+            return to_team
+    return None
+
+
 def transactions(
     season: int, period: int, data: dict[str, Any]
 ) -> list[dict[str, Any]]:
@@ -28,7 +40,7 @@ def transactions(
                 "provider_type": tx.get("type"),
                 "status": tx.get("status"),
                 "category": category(tx),
-                "provider_team_id": tx.get("teamId"),
+                "provider_team_id": _acting_team(tx),
                 "provider_member_id": tx.get("memberId"),
                 "bid_amount": tx.get("bidAmount"),
                 "process_date": millis(tx.get("processDate")),

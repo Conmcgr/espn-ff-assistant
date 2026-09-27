@@ -59,6 +59,23 @@ uv run python scripts/load_run.py data/raw/20260923T011957Z
 ```
 
 The loader is idempotent — safe to rerun after a migration or code change.
+Use `--only core` or `--only player_state` to load just those sections.
+
+## Recommendations
+
+```bash
+uv run python scripts/recommend.py sync                                  # read-only current-week fetch + load
+uv run python scripts/recommend.py whoami --season 2026 --team <id>      # one-time: which team is yours
+uv run python scripts/recommend.py prefs --set streams_dst=true --source onboarding
+uv run python scripts/recommend.py scan --season 2026 --week 4 --save    # lineup + waivers, persisted
+uv run python scripts/recommend.py explain <recommendation_id>
+uv run python scripts/recommend.py feedback <recommendation_id> --action rejected --reason too_much_faab
+uv run python scripts/score_outcomes.py --season 2026 --week 4           # after the week completes
+uv run python scripts/backtest.py                                        # private report in data/derived/
+```
+
+See `docs/recommendation-engine-handoff.md` for design, calibration, and
+known gaps.
 
 ## Validation
 

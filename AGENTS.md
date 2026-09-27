@@ -15,6 +15,10 @@ The current phase covers:
    transaction items, player ownership intervals.
 3. **Manager analytics** — measured waiver, FAAB, trade, roster-churn, lineup,
    draft, and holding-period features with sample sizes and confidence.
+4. **Deterministic recommendations** — ingest provider projections (ESPN
+   first), compute start/sit and waiver recommendations (or `NO_ACTION`), and
+   persist every recommendation, its evidence, feedback, and outcomes. See
+   `docs/recommendation-engine-handoff.md`.
 
 The ESPN data-feasibility spike is complete. Do not re-litigate it.
 
@@ -30,8 +34,9 @@ The ESPN data-feasibility spike is complete. Do not re-litigate it.
    (season, week) argument and must not return data from after that point.
 6. Manager features are numbers with sample sizes and observation windows; no
    inferred psychological labels.
-7. SMS, LLM workflows, projections, dashboards, deployment, and ESPN write
-   actions remain out of scope.
+7. Provider projections are consumed as inputs. Building a proprietary
+   projection model, LLM workflows, SMS, dashboards, deployment, and ESPN
+   write actions remain out of scope.
 
 ## Data and security rules
 
@@ -79,5 +84,7 @@ The ESPN data-feasibility spike is complete. Do not re-litigate it.
 
 ## Scope boundaries
 
-Do not add SMS, LLM workflows, projections, dashboards, deployment, or
-automated ESPN actions unless the user changes the scope explicitly.
+Do not add SMS, LLM workflows, a proprietary projection model, dashboards,
+deployment, or automated ESPN actions unless the user changes the scope
+explicitly. Ingesting provider projections and deterministic recommendation
+logic are in scope.

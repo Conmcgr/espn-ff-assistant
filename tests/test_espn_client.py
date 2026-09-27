@@ -32,3 +32,15 @@ def test_non_json_response_is_safe(monkeypatch) -> None:
     assert result.state == "error"
     assert result.error == "non-JSON response"
 
+
+
+def test_game_level_url_omits_league(monkeypatch) -> None:
+    response = Mock(status_code=200, headers={"content-type": "application/json"})
+    response.json.return_value = {"settings": {"proTeams": []}}
+    client = ESPNClient(make_settings(), delay=0)
+    monkeypatch.setattr(client.session, "get", Mock(return_value=response))
+
+    result = client.fetch(2026, "proTeamSchedules_wl", game_level=True)
+
+    assert result.url.endswith("/seasons/2026")
+    assert "leagues" not in result.url

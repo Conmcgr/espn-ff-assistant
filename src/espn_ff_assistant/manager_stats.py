@@ -4,6 +4,11 @@ All computations are point-in-time: they use only data available at or before
 the given (as_of_season, as_of_week). No psychological labels are assigned;
 every feature is a measured count, rate, or aggregate with a sample size.
 
+Waiver, FAAB, and churn activity is attributed through the acting team
+(season, provider_team_id) and its owners. ESPN stamps executed waiver claims
+with a league-level member ID, so member IDs on transactions are not used for
+attribution of those categories.
+
 Confidence levels:
   'high'   sample_size >= 20
   'medium' sample_size >= 5
@@ -15,11 +20,22 @@ from __future__ import annotations
 
 import statistics
 from collections import defaultdict
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
-from espn_ff_assistant.repository import Repository, Transaction
+from espn_ff_assistant.repository import (
+    DraftPick,
+    OwnershipInterval,
+    Repository,
+    Transaction,
+)
 
-_VERSION = 1
+VERSION = 2
+
+POSITION_NAMES = {1: "QB", 2: "RB", 3: "WR", 4: "TE", 5: "K", 16: "DST"}
+LOST_BID_STATUSES = frozenset({"FAILED_INVALIDPLAYERSOURCE"})
+EARLY_SEASON_LAST_WEEK = 4
 
 
 def _confidence(n: int | None) -> str:
@@ -42,6 +58,7 @@ def _feature(
     season_to: int | None,
     as_of_season: int,
     as_of_week: int,
+    shared_team: bool = False,
 ) -> dict[str, Any]:
     return {
         "manager_id": manager_id,
@@ -54,8 +71,68 @@ def _feature(
         "as_of_season": as_of_season,
         "as_of_week": as_of_week,
         "confidence": _confidence(sample_size),
-        "version": _VERSION,
+        "version": VERSION,
+        "shared_team": shared_team,
     }
+
+
+@dataclass(frozen=True)
+class Window:
+    league_id: str
+    as_of_season: int
+    as_of_week: int
+    seasons: tuple[int, ...]
+
+    def end_week(self, season: int) -> int:
+        return self.as_of_week if season == self.as_of_season else 999
+
+
+@dataclass
+class ManagerScope:
+    manager_id: str
+    provider_member_id: str | None
+    teams_by_season: dict[int, set[int]] = field(default_factory=dict)
+    shared_team: bool = False
+
+    def owns(self, season: int, team_id: int | None) -> bool:
+        return team_id is not None and team_id in self.teams_by_season.get(season, set())
+
+
+Emit = Callable[[str, float | None, int], None]
+
+
+def _emitter(scope: ManagerScope, window: Window, seasons: list[int], out: list[dict[str, Any]]) -> Emit:
+    season_from = min(seasons) if seasons else None
+    season_to = max(seasons) if seasons else None
+
+    def emit(stat: str, value: float | None, n: int) -> None:
+        out.append(
+            _feature(
+                scope.manager_id, window.league_id, stat, value, n,
+                season_from, season_to, window.as_of_season, window.as_of_week,
+                scope.shared_team,
+            )
+        )
+
+    return emit
+
+
+def _to_float(value: Any) -> float | None:
+    return float(value) if value is not None else None
+
+
+def _percentile(values: list[float], pct: float) -> float:
+    ordered = sorted(values)
+    k = (len(ordered) - 1) * pct
+    lo, hi = int(k), min(int(k) + 1, len(ordered) - 1)
+    return ordered[lo] + (ordered[hi] - ordered[lo]) * (k - lo)
+
+
+def _added_player(tx: Transaction) -> int | None:
+    for item in tx.items:
+        if item.get("item_type") == "ADD":
+            return item.get("provider_player_id")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -63,73 +140,93 @@ def _feature(
 # ---------------------------------------------------------------------------
 
 def waiver_features(
-    repo: Repository,
-    league_id: str,
-    manager_id: str,
-    provider_member_id: str,
-    as_of_season: int,
-    as_of_week: int,
-    season_window: list[int],
+    scope: ManagerScope,
+    window: Window,
+    txns_by_season: dict[int, list[Transaction]],
+    budgets: dict[int, int | None],
+    positions: dict[int, int],
 ) -> list[dict[str, Any]]:
-    """Waiver claim counts and FAAB statistics for one manager."""
-    all_claims: list[Transaction] = []
-    all_fa_moves: list[Transaction] = []
+    """Claim counts, failure/outbid rates, and FAAB spending for one manager's teams."""
+    seasons = [s for s in window.seasons if s in txns_by_season]
+    out: list[dict[str, Any]] = []
+    emit = _emitter(scope, window, seasons, out)
 
-    for season in season_window:
-        end_week = as_of_week if season == as_of_season else 999
-        txns = repo.transactions(
-            league_id, season, as_of_week=end_week, include_items=False
-        )
-        for tx in txns:
-            if tx.provider_member_id != provider_member_id:
+    executed: list[Transaction] = []
+    failed: list[Transaction] = []
+    fa_moves = 0
+    pct_of_remaining: list[float] = []
+
+    for season in seasons:
+        season_claims: list[Transaction] = []
+        for tx in txns_by_season[season]:
+            if not scope.owns(season, tx.provider_team_id):
                 continue
-            if tx.category == "waiver_claim" and tx.status == "EXECUTED":
-                all_claims.append(tx)
-            elif tx.category == "free_agent_move":
-                all_fa_moves.append(tx)
+            if tx.category == "waiver_claim":
+                if tx.status == "EXECUTED":
+                    season_claims.append(tx)
+                elif tx.status and tx.status.startswith("FAILED"):
+                    failed.append(tx)
+            elif tx.category == "free_agent_move" and tx.status in ("EXECUTED", None):
+                fa_moves += 1
+        executed.extend(season_claims)
 
-    # All failed claims for FAAB stats
-    failed_claims: list[Transaction] = []
-    for season in season_window:
-        end_week = as_of_week if season == as_of_season else 999
-        txns = repo.transactions(
-            league_id, season, as_of_week=end_week, include_items=False
-        )
-        for tx in txns:
-            if tx.provider_member_id == provider_member_id and tx.category == "waiver_claim" and tx.status != "EXECUTED":
-                failed_claims.append(tx)
+        budget = budgets.get(season)
+        if budget:
+            spent = 0.0
+            ordered = sorted(season_claims, key=lambda t: (t.process_date is None, t.process_date))
+            for tx in ordered:
+                bid = _to_float(tx.bid_amount) or 0.0
+                remaining = budget - spent
+                if remaining > 0:
+                    pct_of_remaining.append(bid / remaining)
+                spent += bid
 
-    season_from = min(season_window) if season_window else None
-    season_to = max(season_window) if season_window else None
+    n_exec = len(executed)
+    n_decided = n_exec + len(failed)
+    lost = sum(1 for tx in failed if tx.status in LOST_BID_STATUSES)
 
-    features: list[dict[str, Any]] = []
+    emit("waiver_claims_total", n_exec, n_exec)
+    emit("free_agent_moves_total", fa_moves, fa_moves)
+    emit("waiver_fail_rate", len(failed) / n_decided if n_decided else None, n_decided)
+    emit("waiver_lost_bid_rate", lost / n_decided if n_decided else None, n_decided)
 
-    # Successful waiver claims
-    n_claims = len(all_claims)
-    features.append(_feature(manager_id, league_id, "waiver_claims_total", n_claims, n_claims, season_from, season_to, as_of_season, as_of_week))
+    faab_seasons = [s for s in seasons if budgets.get(s)]
+    bids = [
+        (tx, float(tx.bid_amount))
+        for tx in executed
+        if tx.bid_amount is not None and tx.season in faab_seasons
+    ]
+    amounts = [b for _, b in bids]
+    emit("faab_total_spent", sum(amounts), len(amounts))
+    emit("faab_mean_winning_bid", statistics.mean(amounts) if amounts else None, len(amounts))
+    emit("faab_median_winning_bid", statistics.median(amounts) if amounts else None, len(amounts))
 
-    # Free-agent moves
-    n_fa = len(all_fa_moves)
-    features.append(_feature(manager_id, league_id, "free_agent_moves_total", n_fa, n_fa, season_from, season_to, as_of_season, as_of_week))
+    total = sum(amounts)
+    early = sum(b for tx, b in bids if (tx.scoring_period or 0) <= EARLY_SEASON_LAST_WEEK)
+    emit("faab_early_season_share", early / total if total else None, len(amounts))
 
-    # FAAB spend from successful claims
-    bids = [tx.bid_amount for tx in all_claims if tx.bid_amount is not None]
-    if bids:
-        features.append(_feature(manager_id, league_id, "faab_total_spent", sum(bids), len(bids), season_from, season_to, as_of_season, as_of_week))
-        features.append(_feature(manager_id, league_id, "faab_mean_winning_bid", statistics.mean(bids), len(bids), season_from, season_to, as_of_season, as_of_week))
-        features.append(_feature(manager_id, league_id, "faab_median_winning_bid", statistics.median(bids), len(bids), season_from, season_to, as_of_season, as_of_week))
-    else:
-        features.append(_feature(manager_id, league_id, "faab_total_spent", 0, 0, season_from, season_to, as_of_season, as_of_week))
-        features.append(_feature(manager_id, league_id, "faab_mean_winning_bid", None, 0, season_from, season_to, as_of_season, as_of_week))
-        features.append(_feature(manager_id, league_id, "faab_median_winning_bid", None, 0, season_from, season_to, as_of_season, as_of_week))
+    emit(
+        "faab_bid_pct_of_remaining_median",
+        statistics.median(pct_of_remaining) if pct_of_remaining else None,
+        len(pct_of_remaining),
+    )
+    emit(
+        "faab_bid_pct_of_remaining_p75",
+        _percentile(pct_of_remaining, 0.75) if pct_of_remaining else None,
+        len(pct_of_remaining),
+    )
 
-    # Failed claim rate
-    n_failed = len(failed_claims)
-    n_total_claims = n_claims + n_failed
-    fail_rate = n_failed / n_total_claims if n_total_claims else None
-    features.append(_feature(manager_id, league_id, "waiver_fail_rate", fail_rate, n_total_claims, season_from, season_to, as_of_season, as_of_week))
+    by_position: dict[str, list[float]] = defaultdict(list)
+    for tx, bid in bids:
+        pid = _added_player(tx)
+        name = POSITION_NAMES.get(positions.get(pid)) if pid is not None else None
+        if name:
+            by_position[name].append(bid)
+    for name in POSITION_NAMES.values():
+        values = by_position.get(name, [])
+        emit(f"faab_median_bid_{name}", statistics.median(values) if values else None, len(values))
 
-    return features
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -137,62 +234,40 @@ def waiver_features(
 # ---------------------------------------------------------------------------
 
 def trade_features(
-    repo: Repository,
-    league_id: str,
-    manager_id: str,
-    provider_member_id: str,
-    provider_team_ids_by_season: dict[int, list[int]],
-    as_of_season: int,
-    as_of_week: int,
-    season_window: list[int],
+    scope: ManagerScope,
+    window: Window,
+    txns_by_season: dict[int, list[Transaction]],
 ) -> list[dict[str, Any]]:
-    """Trade frequency, acceptance rates, and multi-player tendencies."""
+    """Trade frequency, proposals, multi-player tendency, and partner breadth."""
+    seasons = [s for s in window.seasons if s in txns_by_season]
+    out: list[dict[str, Any]] = []
+    emit = _emitter(scope, window, seasons, out)
+
     completed: list[Transaction] = []
-    proposals_sent: list[Transaction] = []
-    proposals_received: list[Transaction] = []
-
-    for season in season_window:
-        team_ids = provider_team_ids_by_season.get(season, [])
-        end_week = as_of_week if season == as_of_season else 999
-        txns = repo.transactions(league_id, season, as_of_week=end_week, include_items=True)
-
-        for tx in txns:
-            is_member = tx.provider_member_id == provider_member_id or tx.provider_team_id in team_ids
-            if tx.category == "completed_trade" and is_member:
+    proposals_sent = 0
+    for season in seasons:
+        for tx in txns_by_season[season]:
+            mine = scope.owns(season, tx.provider_team_id)
+            if tx.category == "completed_trade" and mine:
                 completed.append(tx)
-            elif tx.category == "trade_proposal":
-                if is_member:
-                    proposals_sent.append(tx)
-                else:
-                    # Received: one of my teams is in the items
-                    for item in tx.items:
-                        if item.get("from_provider_team_id") in team_ids or item.get("to_provider_team_id") in team_ids:
-                            proposals_received.append(tx)
-                            break
+            elif tx.category == "trade_proposal" and mine:
+                proposals_sent += 1
 
-    season_from = min(season_window) if season_window else None
-    season_to = max(season_window) if season_window else None
+    n = len(completed)
+    emit("trades_completed_total", n, n)
+    emit("trade_proposals_sent", proposals_sent, proposals_sent)
+    multi = sum(1 for tx in completed if len(tx.items) > 2)
+    emit("trade_multi_player_rate", multi / n if n else None, n)
 
-    features: list[dict[str, Any]] = []
-
-    n_completed = len(completed)
-    features.append(_feature(manager_id, league_id, "trades_completed_total", n_completed, n_completed, season_from, season_to, as_of_season, as_of_week))
-    features.append(_feature(manager_id, league_id, "trade_proposals_sent", len(proposals_sent), len(proposals_sent), season_from, season_to, as_of_season, as_of_week))
-
-    # Multi-player trade rate: trades with >2 total items / 2 players moving
-    multi_player = sum(1 for tx in completed if len(tx.items) > 2)
-    features.append(_feature(manager_id, league_id, "trade_multi_player_rate", multi_player / n_completed if n_completed else None, n_completed, season_from, season_to, as_of_season, as_of_week))
-
-    # Unique trade partners
-    partners: set[int] = set()
+    partners: set[tuple[int, int]] = set()
     for tx in completed:
+        own = scope.teams_by_season.get(tx.season, set())
         for item in tx.items:
-            for tid in [item.get("from_provider_team_id"), item.get("to_provider_team_id")]:
-                if tid and tid not in (provider_team_ids_by_season.get(as_of_season) or []):
-                    partners.add(tid)
-    features.append(_feature(manager_id, league_id, "trade_unique_partners", len(partners), n_completed, season_from, season_to, as_of_season, as_of_week))
-
-    return features
+            for tid in (item.get("from_provider_team_id"), item.get("to_provider_team_id")):
+                if tid and tid not in own:
+                    partners.add((tx.season, tid))
+    emit("trade_unique_partners", len(partners), n)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -200,48 +275,33 @@ def trade_features(
 # ---------------------------------------------------------------------------
 
 def roster_churn_features(
-    repo: Repository,
-    league_id: str,
-    manager_id: str,
-    provider_member_id: str,
-    provider_team_ids_by_season: dict[int, list[int]],
-    as_of_season: int,
-    as_of_week: int,
-    season_window: list[int],
+    scope: ManagerScope,
+    window: Window,
+    txns_by_season: dict[int, list[Transaction]],
+    weeks_by_season: dict[int, int],
 ) -> list[dict[str, Any]]:
-    """Adds per week and streaming behavior."""
-    total_adds = 0
-    total_weeks = 0
+    """Adds per observed week. Sample size is the number of adds."""
+    seasons = [s for s in window.seasons if s in txns_by_season]
+    out: list[dict[str, Any]] = []
+    emit = _emitter(scope, window, seasons, out)
 
-    for season in season_window:
-        team_ids = provider_team_ids_by_season.get(season, [])
-        end_week = as_of_week if season == as_of_season else 999
-        txns = repo.transactions(league_id, season, as_of_week=end_week, include_items=True)
-
-        season_obj = next((s for s in repo.seasons(league_id) if s.season == season), None)
-        if season_obj and season_obj.first_scoring_period and season_obj.final_scoring_period:
-            weeks_in_season = min(end_week, season_obj.final_scoring_period) - season_obj.first_scoring_period + 1
-            total_weeks += max(0, weeks_in_season)
-
-        for tx in txns:
+    adds = 0
+    weeks = 0
+    for season in seasons:
+        if not scope.teams_by_season.get(season):
+            continue
+        weeks += weeks_by_season.get(season, 0)
+        for tx in txns_by_season[season]:
             if tx.category not in ("waiver_claim", "free_agent_move"):
                 continue
-            is_member = tx.provider_member_id == provider_member_id or tx.provider_team_id in team_ids
-            if not is_member:
+            if tx.status not in ("EXECUTED", None) or not scope.owns(season, tx.provider_team_id):
                 continue
-            for item in tx.items:
-                if item.get("item_type") == "ADD":
-                    total_adds += 1
+            adds += sum(1 for item in tx.items if item.get("item_type") == "ADD")
 
-    season_from = min(season_window) if season_window else None
-    season_to = max(season_window) if season_window else None
-
-    features: list[dict[str, Any]] = []
-    adds_per_week = total_adds / total_weeks if total_weeks else None
-    features.append(_feature(manager_id, league_id, "adds_total", total_adds, total_adds, season_from, season_to, as_of_season, as_of_week))
-    features.append(_feature(manager_id, league_id, "adds_per_week", adds_per_week, total_weeks, season_from, season_to, as_of_season, as_of_week))
-
-    return features
+    emit("adds_total", adds, adds)
+    emit("adds_per_week", adds / weeks if weeks else None, adds)
+    emit("weeks_observed", weeks, weeks)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -249,45 +309,27 @@ def roster_churn_features(
 # ---------------------------------------------------------------------------
 
 def holding_period_features(
-    conn: Any,
-    league_id: str,
-    manager_id: str,
-    season_ids: dict[int, str],
-    as_of_season: int,
-    as_of_week: int,
-    season_window: list[int],
+    scope: ManagerScope,
+    window: Window,
+    intervals: list[OwnershipInterval],
 ) -> list[dict[str, Any]]:
-    """Median holding period in weeks from player_ownership_intervals."""
-    sid_list = [season_ids[s] for s in season_window if s in season_ids]
-    if not sid_list:
-        return []
+    """Holding periods of closed ownership intervals for this manager's teams."""
+    mine = [iv for iv in intervals if scope.owns(iv.season, iv.provider_team_id)]
+    seasons = sorted({iv.season for iv in mine}) or list(window.seasons)
+    out: list[dict[str, Any]] = []
+    emit = _emitter(scope, window, seasons, out)
 
-    rows = conn.execute(
-        """
-        SELECT poi.end_week - poi.start_week AS holding_weeks, poi.end_reason
-        FROM player_ownership_intervals poi
-        JOIN team_owners to2 ON to2.league_season_id=poi.league_season_id
-            AND to2.provider_team_id=poi.provider_team_id
-        JOIN managers m ON m.id=to2.manager_id
-        WHERE poi.league_season_id = ANY(%s)
-          AND m.id=%s
-          AND poi.end_week IS NOT NULL
-        """,
-        (sid_list, manager_id),
-    ).fetchall()
-
-    holding_weeks = [r[0] for r in rows if r[0] is not None and r[0] >= 0]
-    drops = sum(1 for r in rows if r[1] == "drop")
-
-    season_from = min(season_window) if season_window else None
-    season_to = max(season_window) if season_window else None
-
-    features: list[dict[str, Any]] = []
-    n = len(holding_weeks)
-    features.append(_feature(manager_id, league_id, "holding_period_median_weeks", statistics.median(holding_weeks) if holding_weeks else None, n, season_from, season_to, as_of_season, as_of_week))
-    features.append(_feature(manager_id, league_id, "holding_period_mean_weeks", statistics.mean(holding_weeks) if holding_weeks else None, n, season_from, season_to, as_of_season, as_of_week))
-    features.append(_feature(manager_id, league_id, "players_dropped_total", drops, n, season_from, season_to, as_of_season, as_of_week))
-    return features
+    weeks = [
+        iv.end_week - iv.start_week
+        for iv in mine
+        if iv.end_week is not None and iv.end_week >= iv.start_week
+    ]
+    drops = sum(1 for iv in mine if iv.end_reason == "drop")
+    n = len(weeks)
+    emit("holding_period_median_weeks", statistics.median(weeks) if weeks else None, n)
+    emit("holding_period_mean_weeks", statistics.mean(weeks) if weeks else None, n)
+    emit("players_dropped_total", drops, n)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -295,49 +337,19 @@ def holding_period_features(
 # ---------------------------------------------------------------------------
 
 def draft_features(
-    repo: Repository,
-    conn: Any,
-    league_id: str,
-    manager_id: str,
-    provider_team_ids_by_season: dict[int, list[int]],
-    as_of_season: int,
-    as_of_week: int,
-    season_window: list[int],
+    scope: ManagerScope,
+    window: Window,
+    picks: list[DraftPick],
 ) -> list[dict[str, Any]]:
-    """Picks per round, early-round position tendencies."""
-    # Build {season_id: [picks]} for this manager's teams
-    season_objs = {s.season: s for s in repo.seasons(league_id)}
-    all_picks: list[dict[str, Any]] = []
+    mine = [p for p in picks if scope.owns(p.season, p.provider_team_id)]
+    seasons = sorted({p.season for p in mine}) or list(window.seasons)
+    out: list[dict[str, Any]] = []
+    emit = _emitter(scope, window, seasons, out)
 
-    for season in season_window:
-        team_ids = provider_team_ids_by_season.get(season, [])
-        if not team_ids:
-            continue
-        s_obj = season_objs.get(season)
-        if not s_obj:
-            continue
-        rows = conn.execute(
-            """SELECT overall_pick, round, round_pick, provider_team_id, provider_player_id
-               FROM draft_picks WHERE league_season_id=%s
-               ORDER BY overall_pick""",
-            (s_obj.season_id,),
-        ).fetchall()
-        for row in rows:
-            if row[3] in team_ids:
-                all_picks.append({"season": season, "round": row[1], "round_pick": row[2], "player_id": row[4]})
-
-    season_from = min(season_window) if season_window else None
-    season_to = max(season_window) if season_window else None
-    n = len(all_picks)
-
-    features: list[dict[str, Any]] = []
-    features.append(_feature(manager_id, league_id, "draft_picks_total", n, n, season_from, season_to, as_of_season, as_of_week))
-
-    # Average round of first pick (proxy for draft position)
-    first_picks = [p["round_pick"] for p in all_picks if p["round"] == 1]
-    features.append(_feature(manager_id, league_id, "draft_avg_first_round_position", statistics.mean(first_picks) if first_picks else None, len(first_picks), season_from, season_to, as_of_season, as_of_week))
-
-    return features
+    emit("draft_picks_total", len(mine), len(mine))
+    first = [p.round_pick for p in mine if p.round == 1 and p.round_pick is not None]
+    emit("draft_avg_first_round_position", statistics.mean(first) if first else None, len(first))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -353,15 +365,13 @@ def build_ownership_intervals(conn: Any, league_id: str) -> int:
 
     Returns the number of intervals inserted/updated.
     """
-    # Get all league_seasons for this league
     season_rows = conn.execute(
-        "SELECT id, season FROM league_seasons WHERE league_id=%s ORDER BY season",
+        "SELECT id, season, final_scoring_period FROM league_seasons WHERE league_id=%s ORDER BY season",
         (league_id,),
     ).fetchall()
 
     total = 0
-    for (season_id, season) in season_rows:
-        # Get roster presence per (team, player)
+    for (season_id, season, final_week) in season_rows:
         rows = conn.execute(
             """
             SELECT rs.provider_team_id, re.provider_player_id,
@@ -377,14 +387,9 @@ def build_ownership_intervals(conn: Any, league_id: str) -> int:
         ).fetchall()
 
         for team_id, player_id, start_week, end_week, acq_type in rows:
-            # Check whether the player was on this team at the season's final week
-            final_week = conn.execute(
-                "SELECT final_scoring_period FROM league_seasons WHERE id=%s", (season_id,)
-            ).fetchone()
-            at_end = final_week and end_week >= final_week[0]
+            at_end = final_week is not None and end_week >= final_week
             end_reason = "season_end" if at_end else "drop_or_trade"
 
-            # Try to match a drop/trade transaction if available (2018+)
             end_tx_id = None
             if season >= 2018 and not at_end:
                 tx_row = conn.execute(
@@ -429,9 +434,24 @@ def build_ownership_intervals(conn: Any, league_id: str) -> int:
 # Top-level: compute all features for all managers
 # ---------------------------------------------------------------------------
 
+def manager_scopes(
+    owner_map: dict[tuple[int, int], list[str]],
+    member_ids: dict[str, str],
+    seasons: list[int],
+) -> list[ManagerScope]:
+    """Build per-manager team ownership, flagging managers on co-owned teams."""
+    scopes: dict[str, ManagerScope] = {}
+    for (season, team_id), owners in owner_map.items():
+        for manager_id in owners:
+            scope = scopes.setdefault(manager_id, ManagerScope(manager_id, member_ids.get(manager_id)))
+            scope.teams_by_season.setdefault(season, set()).add(team_id)
+            if len(owners) > 1 and season in seasons:
+                scope.shared_team = True
+    return sorted(scopes.values(), key=lambda s: s.manager_id)
+
+
 def compute_all_features(
     repo: Repository,
-    conn: Any,
     league_id: str,
     as_of_season: int,
     as_of_week: int,
@@ -441,51 +461,46 @@ def compute_all_features(
 
     tx_season_from: earliest season with transaction data (default 2018).
     """
-    all_features: list[dict[str, Any]] = []
+    season_objs = [s for s in repo.seasons(league_id) if s.season <= as_of_season]
+    all_seasons = tuple(s.season for s in season_objs)
+    tx_seasons = tuple(s for s in all_seasons if s >= tx_season_from)
+    tx_window = Window(league_id, as_of_season, as_of_week, tx_seasons)
+    all_window = Window(league_id, as_of_season, as_of_week, all_seasons)
 
-    # Seasons in the transaction modeling window
-    seasons_obj = repo.seasons(league_id)
-    season_ids = {s.season: s.season_id for s in seasons_obj}
-    tx_seasons = [
-        s.season for s in seasons_obj
-        if s.season >= tx_season_from
-        and (s.season < as_of_season or (s.season == as_of_season))
-    ]
+    txns_by_season = {
+        s: repo.transactions(league_id, s, as_of_week=tx_window.end_week(s), include_items=True)
+        for s in tx_seasons
+    }
+    budgets = {s: repo.faab_budget(league_id, s) for s in tx_seasons}
+    weeks_by_season: dict[int, int] = {}
+    for s in season_objs:
+        if s.season in tx_seasons and s.first_scoring_period and s.final_scoring_period:
+            last = min(tx_window.end_week(s.season), s.final_scoring_period)
+            weeks_by_season[s.season] = max(0, last - s.first_scoring_period + 1)
 
-    # Get all managers ever linked to this league
-    managers = conn.execute(
-        """
-        SELECT DISTINCT m.id, m.provider_member_id, m.display_name
-        FROM managers m
-        JOIN team_owners to2 ON to2.manager_id=m.id
-        JOIN league_seasons ls ON ls.id=to2.league_season_id
-        WHERE ls.league_id=%s
-        ORDER BY m.id
-        """,
-        (league_id,),
-    ).fetchall()
+    added = {
+        pid
+        for txns in txns_by_season.values()
+        for tx in txns
+        for item in tx.items
+        if item.get("item_type") == "ADD" and (pid := item.get("provider_player_id")) is not None
+    }
+    positions = {
+        pid: p.default_position_id
+        for pid, p in repo.players_by_ids(sorted(added)).items()
+        if p.default_position_id is not None
+    }
+    intervals = repo.ownership_intervals(league_id, list(tx_seasons), as_of_season, as_of_week)
+    picks = [p for s in all_seasons for p in repo.draft_picks(league_id, s)]
 
-    for (mgr_id, member_id, _display) in managers:
-        mgr_id_str = str(mgr_id)
+    member_ids = {m.manager_id: m.provider_member_id for m in repo.league_managers(league_id)}
+    scopes = manager_scopes(repo.team_owner_map(league_id), member_ids, list(tx_seasons))
 
-        # Map season → team IDs for this manager
-        team_rows = conn.execute(
-            """
-            SELECT ls.season, to2.provider_team_id
-            FROM team_owners to2
-            JOIN league_seasons ls ON ls.id=to2.league_season_id
-            WHERE ls.league_id=%s AND to2.manager_id=%s
-            """,
-            (league_id, mgr_id),
-        ).fetchall()
-        team_ids_by_season: dict[int, list[int]] = defaultdict(list)
-        for season, tid in team_rows:
-            team_ids_by_season[season].append(tid)
-
-        all_features.extend(waiver_features(repo, league_id, mgr_id_str, member_id, as_of_season, as_of_week, tx_seasons))
-        all_features.extend(trade_features(repo, league_id, mgr_id_str, member_id, dict(team_ids_by_season), as_of_season, as_of_week, tx_seasons))
-        all_features.extend(roster_churn_features(repo, league_id, mgr_id_str, member_id, dict(team_ids_by_season), as_of_season, as_of_week, tx_seasons))
-        all_features.extend(holding_period_features(conn, league_id, mgr_id_str, season_ids, as_of_season, as_of_week, tx_seasons))
-        all_features.extend(draft_features(repo, conn, league_id, mgr_id_str, dict(team_ids_by_season), as_of_season, as_of_week, list(season_ids.keys())))
-
-    return all_features
+    features: list[dict[str, Any]] = []
+    for scope in scopes:
+        features.extend(waiver_features(scope, tx_window, txns_by_season, budgets, positions))
+        features.extend(trade_features(scope, tx_window, txns_by_season))
+        features.extend(roster_churn_features(scope, tx_window, txns_by_season, weeks_by_season))
+        features.extend(holding_period_features(scope, tx_window, intervals))
+        features.extend(draft_features(scope, all_window, picks))
+    return features

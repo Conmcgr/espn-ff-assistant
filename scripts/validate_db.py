@@ -227,6 +227,36 @@ def check_transactions(conn, league_id, season_ids, season_filter, r: Results) -
             r.ok(f"Transaction categories {season}", ", ".join(f"{c}={n}" for c, n in cats))
 
 
+def check_claim_attribution(conn, league_id, season_ids, season_filter, r: Results) -> None:
+    """Waiver/free-agent activity must resolve to a team owner; member IDs are informational."""
+    sids = [sid for s, sid in season_ids.items() if season_filter is None or s == season_filter]
+    rows = conn.execute(
+        """
+        SELECT t.category,
+               count(*) AS total,
+               count(*) FILTER (WHERE EXISTS (
+                   SELECT 1 FROM team_owners o
+                   WHERE o.league_season_id=t.league_season_id
+                     AND o.provider_team_id=t.provider_team_id)) AS team_resolved,
+               count(*) FILTER (WHERE EXISTS (
+                   SELECT 1 FROM managers m WHERE m.provider_member_id=t.provider_member_id)) AS member_resolved
+        FROM transactions t
+        WHERE t.league_season_id = ANY(%s)
+          AND t.category IN ('waiver_claim', 'free_agent_move')
+          AND t.status='EXECUTED'
+        GROUP BY t.category ORDER BY t.category
+        """,
+        (sids,),
+    ).fetchall()
+    for category, total, team_resolved, member_resolved in rows:
+        label = f"Executed {category} attribution"
+        detail = f"{team_resolved}/{total} resolve via team owner; {member_resolved}/{total} via member ID"
+        if team_resolved < total:
+            r.fail(label, detail)
+        else:
+            r.ok(label, detail)
+
+
 def check_matchups(conn, league_id, season_ids, season_filter, r: Results) -> None:
     """Winners must agree with scores; cross-check team records against mTeam."""
     seasons = [s for s in season_ids if season_filter is None or s == season_filter]
@@ -395,6 +425,7 @@ def main() -> int:
 
         print("\n=== Transactions ===")
         check_transactions(conn, league_id, season_ids, args.season, r)
+        check_claim_attribution(conn, league_id, season_ids, args.season, r)
 
         print("\n=== Matchups ===")
         check_matchups(conn, league_id, season_ids, args.season, r)

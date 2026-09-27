@@ -58,6 +58,7 @@ class ESPNClient:
         extra_params: dict[str, Any] | None = None,
         fantasy_filter: dict[str, Any] | None = None,
         archive_key: str | None = None,
+        game_level: bool = False,
     ) -> FetchResult:
         params: dict[str, Any] = {"view": view}
         if scoring_period is not None:
@@ -70,7 +71,7 @@ class ESPNClient:
 
             headers["X-Fantasy-Filter"] = json.dumps(fantasy_filter, separators=(",", ":"))
 
-        url = self._url(season, extend)
+        url = f"{self.root}/seasons/{season}" if game_level else self._url(season, extend)
         retrieved_at = datetime.now(UTC).isoformat()
         response: requests.Response | None = None
         error: str | None = None
