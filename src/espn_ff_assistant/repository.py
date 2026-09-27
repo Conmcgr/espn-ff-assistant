@@ -122,6 +122,34 @@ class ManagerFeature:
     as_of_week: int
     confidence: str | None
     version: int
+    shared_team: bool = False
+
+
+@dataclass
+class LeagueManager:
+    manager_id: str
+    provider_member_id: str
+    display_name: str | None
+
+
+@dataclass
+class OwnershipInterval:
+    season: int
+    provider_team_id: int
+    provider_player_id: int
+    start_week: int
+    end_week: int | None
+    end_reason: str | None
+
+
+@dataclass
+class DraftPick:
+    season: int
+    overall_pick: int | None
+    round: int | None
+    round_pick: int | None
+    provider_team_id: int | None
+    provider_player_id: int | None
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +269,105 @@ class Repository:
             )
             for r in rows
         ]
+
+    def league_managers(self, league_id: str) -> list[LeagueManager]:
+        """Every manager who has owned or co-owned a team in the league."""
+        rows = self._conn.execute(
+            """SELECT DISTINCT m.id, m.provider_member_id, m.display_name
+               FROM managers m
+               JOIN team_owners to2 ON to2.manager_id=m.id
+               JOIN league_seasons ls ON ls.id=to2.league_season_id
+               WHERE ls.league_id=%s
+               ORDER BY m.display_name NULLS LAST, m.id""",
+            (league_id,),
+        ).fetchall()
+        return [LeagueManager(str(r[0]), r[1], r[2]) for r in rows]
+
+    def team_owner_map(self, league_id: str) -> dict[tuple[int, int], list[str]]:
+        """{(season, provider_team_id): [manager_id, ...]} across all seasons."""
+        rows = self._conn.execute(
+            """SELECT ls.season, to2.provider_team_id, to2.manager_id
+               FROM team_owners to2
+               JOIN league_seasons ls ON ls.id=to2.league_season_id
+               WHERE ls.league_id=%s
+               ORDER BY ls.season, to2.provider_team_id, to2.is_primary DESC""",
+            (league_id,),
+        ).fetchall()
+        owners: dict[tuple[int, int], list[str]] = {}
+        for season, team_id, manager_id in rows:
+            owners.setdefault((season, team_id), []).append(str(manager_id))
+        return owners
+
+    # ---- Settings ----------------------------------------------------------
+
+    def league_settings(self, league_id: str, season: int) -> dict[str, Any] | None:
+        """Raw ESPN settings object stored for a season."""
+        sid = self._season_id(league_id, season)
+        if not sid:
+            return None
+        row = self._conn.execute(
+            "SELECT settings FROM league_settings WHERE league_season_id=%s", (sid,)
+        ).fetchone()
+        return row[0] if row else None
+
+    def faab_budget(self, league_id: str, season: int) -> int | None:
+        """Season FAAB budget, or None when the league does not use FAAB."""
+        settings = self.league_settings(league_id, season) or {}
+        acquisition = settings.get("acquisitionSettings") or {}
+        if not acquisition.get("isUsingAcquisitionBudget"):
+            return None
+        budget = acquisition.get("acquisitionBudget")
+        return int(budget) if isinstance(budget, (int, float)) else None
+
+    def faab_remaining(self, league_id: str, season: int, as_of_week: int) -> dict[int, int]:
+        """{provider_team_id: budget minus executed claim spend through as_of_week}."""
+        budget = self.faab_budget(league_id, season)
+        sid = self._season_id(league_id, season)
+        if budget is None or not sid:
+            return {}
+        teams = self._conn.execute(
+            "SELECT provider_team_id FROM teams WHERE league_season_id=%s", (sid,)
+        ).fetchall()
+        spent = dict(
+            self._conn.execute(
+                """SELECT provider_team_id, COALESCE(SUM(bid_amount), 0)
+                   FROM transactions
+                   WHERE league_season_id=%s AND category='waiver_claim'
+                     AND status='EXECUTED' AND scoring_period<=%s
+                   GROUP BY provider_team_id""",
+                (sid, as_of_week),
+            ).fetchall()
+        )
+        return {t[0]: budget - int(spent.get(t[0], 0)) for t in teams}
+
+    # ---- Ownership intervals and drafts --------------------------------------
+
+    def ownership_intervals(
+        self, league_id: str, seasons: list[int], as_of_season: int, as_of_week: int
+    ) -> list[OwnershipInterval]:
+        """Closed intervals ending at or before the as-of point."""
+        rows = self._conn.execute(
+            """SELECT ls.season, poi.provider_team_id, poi.provider_player_id,
+                      poi.start_week, poi.end_week, poi.end_reason
+               FROM player_ownership_intervals poi
+               JOIN league_seasons ls ON ls.id=poi.league_season_id
+               WHERE ls.league_id=%s AND ls.season = ANY(%s)
+                 AND poi.end_week IS NOT NULL
+                 AND (ls.season < %s OR (ls.season=%s AND poi.end_week<=%s))""",
+            (league_id, seasons, as_of_season, as_of_season, as_of_week),
+        ).fetchall()
+        return [OwnershipInterval(*r) for r in rows]
+
+    def draft_picks(self, league_id: str, season: int) -> list[DraftPick]:
+        sid = self._season_id(league_id, season)
+        if not sid:
+            return []
+        rows = self._conn.execute(
+            """SELECT overall_pick, round, round_pick, provider_team_id, provider_player_id
+               FROM draft_picks WHERE league_season_id=%s ORDER BY overall_pick""",
+            (sid,),
+        ).fetchall()
+        return [DraftPick(season, *r) for r in rows]
 
     # ---- Players -----------------------------------------------------------
 
@@ -532,10 +659,12 @@ class Repository:
         as_of_season: int,
         as_of_week: int,
         manager_id: str | None = None,
+        version: int | None = None,
     ) -> list[ManagerFeature]:
         """Computed manager feature rows as of a given week.
 
-        Never returns rows computed after as_of_season/as_of_week.
+        Never returns rows computed after as_of_season/as_of_week. Defaults to
+        the newest feature version present, so superseded rows are not mixed in.
         """
         filters = [
             "mf.league_id=%s",
@@ -546,12 +675,21 @@ class Repository:
         if manager_id:
             filters.append("mf.manager_id=%s")
             params.append(manager_id)
+        if version is None:
+            filters.append(
+                "mf.version=(SELECT MAX(version) FROM manager_features WHERE league_id=%s)"
+            )
+            params.append(league_id)
+        else:
+            filters.append("mf.version=%s")
+            params.append(version)
 
         where = " AND ".join(filters)
         rows = self._conn.execute(
             f"""SELECT mf.manager_id, mf.league_id, mf.stat_name, mf.value,
                        mf.sample_size, mf.season_from, mf.season_to,
-                       mf.as_of_season, mf.as_of_week, mf.confidence, mf.version
+                       mf.as_of_season, mf.as_of_week, mf.confidence, mf.version,
+                       mf.shared_team
                 FROM manager_features mf WHERE {where}
                 ORDER BY mf.manager_id, mf.stat_name, mf.as_of_season DESC, mf.as_of_week DESC""",
             params,
@@ -570,6 +708,7 @@ class Repository:
                 as_of_week=r[8],
                 confidence=r[9],
                 version=r[10],
+                shared_team=bool(r[11]),
             )
             for r in rows
         ]
@@ -585,15 +724,17 @@ class Repository:
                 """INSERT INTO manager_features
                        (manager_id, league_id, stat_name, value, sample_size,
                         season_from, season_to, as_of_season, as_of_week,
-                        confidence, version)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        confidence, version, shared_team)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                    ON CONFLICT (manager_id, league_id, stat_name, as_of_season, as_of_week, version)
                    DO UPDATE SET
                        value=EXCLUDED.value,
                        sample_size=EXCLUDED.sample_size,
                        season_from=EXCLUDED.season_from,
                        season_to=EXCLUDED.season_to,
-                       confidence=EXCLUDED.confidence""",
+                       confidence=EXCLUDED.confidence,
+                       shared_team=EXCLUDED.shared_team,
+                       computed_at=now()""",
                 [
                     (
                         f["manager_id"],
@@ -607,6 +748,7 @@ class Repository:
                         f["as_of_week"],
                         f.get("confidence"),
                         f.get("version", 1),
+                        f.get("shared_team", False),
                     )
                     for f in features
                 ],

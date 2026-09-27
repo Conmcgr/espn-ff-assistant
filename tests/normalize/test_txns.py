@@ -72,3 +72,15 @@ def test_transaction_items_empty():
 def test_no_transactions_key():
     rows = transactions(2024, 5, {})
     assert rows == []
+
+
+def test_sentinel_team_id_falls_back_to_add_destination():
+    tx = _tx("tx-s", items=[_item(9, -1, 7), _item(8, 7, -1, item_type="DROP")])
+    tx["teamId"] = -2147483648
+    assert transactions(2018, 3, {"transactions": [tx]})[0]["provider_team_id"] == 7
+
+
+def test_sentinel_team_id_without_add_is_none():
+    tx = _tx("tx-t", tx_type="TRADE_PROPOSAL", items=[_item(9, 2, 3, item_type="TRADE")])
+    tx["teamId"] = -2147483648
+    assert transactions(2018, 3, {"transactions": [tx]})[0]["provider_team_id"] is None

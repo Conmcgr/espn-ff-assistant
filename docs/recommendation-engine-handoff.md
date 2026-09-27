@@ -33,8 +33,8 @@ or `NO_ACTION`. Every result gets persisted, including suppressed ones and
 
 ### Required scope change
 
-`AGENTS.md` currently lists "projections" and "LLM workflows" as out of scope.
-The first PR of this work must update `AGENTS.md` to say:
+**Done in R0.** `AGENTS.md` previously listed "projections" and "LLM
+workflows" as out of scope. It now says:
 
 - **Allowed:** ingesting provider projections (ESPN first), deterministic
   lineup/waiver recommendation logic, and persisting recommendations,
@@ -138,7 +138,17 @@ All of these are point-in-time, 2018+, executed claims only:
 - `faab_bid_pct_of_remaining`: bid ÷ budget remaining at bid time. Report median and p75.
 - `faab_bid_by_position`: median winning bid per position.
 - `faab_early_season_share`: share of spend in weeks 1–4.
-- `faab_remaining`: current budget left. From `mTeam`, or $200 minus executed spend this season.
+- `faab_remaining`: current budget left. Implemented as
+  `Repository.faab_remaining()` (budget minus executed spend through the
+  as-of week), not as a manager feature, because it is team state.
+
+**R0 status (done):**
+- Migration 008 adds `manager_features.shared_team`.
+- Migration 009 backfills the sentinel team IDs.
+- Features are now version 2, and `Repository.manager_features()` returns
+  the newest version by default.
+- Team-attributed FAAB reconciles exactly with SQL: $10,203 across 796
+  executed claims.
 
 ### Acceptance
 
@@ -151,7 +161,7 @@ All of these are point-in-time, 2018+, executed claims only:
 
 ## 3. Step R1 — Current-week ingest (players, projections, availability)
 
-### Migration `008_player_week_state.sql`
+### Migration `010_player_week_state.sql`
 
 ```sql
 -- One row per player × period × source × split, per sync run (projections move during the week).
@@ -449,7 +459,7 @@ bid    = clamp(round(base × demand), min_bid, min(user_faab_remaining, value_ca
 
 ## 6. Step R4 — Recommendation persistence, user identity, preferences
 
-### Migration `009_recommendations.sql`
+### Migration `011_recommendations.sql`
 
 ```sql
 CREATE TABLE user_teams (             -- which team is "me" per season; no hardcoding
@@ -633,12 +643,17 @@ this file.
    correctly, and which field holds the waiver clear time?
 3. Does `proTeamSchedules_wl` exist and return byes and kickoffs for 2026?
 4. Remaining FAAB per team: which `mTeam` field, if any?
-5. `FAILED_INVALIDPLAYERSOURCE`: does it mean "outbid / player went
-   elsewhere"? Check it against the executed claim on the same player and
-   period.
-6. The system `provider_member_id` on executed claims: confirm it is a
-   league or system actor and not a real member. Don't write the ID into
-   this file.
+5. ~~`FAILED_INVALIDPLAYERSOURCE` meaning.~~ **Resolved (R0):** it means
+   outbid. 307 of 314 have an executed claim on the same player by another
+   team within the same waiver run, always with a bid ≥ the failed bid.
+   `FAILED_MATCHUPACQUISITIONLIMIT` claims (30) also always have a same-run
+   winner, but they are not counted as lost bids. Failed claims are
+   runner-up bids, which the FAAB backtest can use.
+6. ~~System member ID on executed claims.~~ **Resolved (R0):** one ID is
+   used on every executed claim from 2018 to 2026 and matches no manager.
+   Claims are attributed by team. Also, 2018 had 137 transactions with the
+   sentinel `teamId = -2147483648`. The normalizer now derives the acting
+   team from the ADD item, and migration 009 backfilled the stored rows.
 7. League timezone for the waiver process hour.
 
 ---
@@ -648,9 +663,9 @@ this file.
 | PR | Contents | Done when |
 |---|---|---|
 | 1 | `AGENTS.md` scope update; R0 feature fixes (+ migration if a column is added); validation check for attribution | Executed-claim FAAB reconciles; tests green |
-| 2 | Migration 008, player normalizers, `sync_current.py`, historical week-stats backfill, repository reads | Week-4 projections, pool, and byes loaded; rerun-safe |
+| 2 | Migration 010, player normalizers, `sync_current.py`, historical week-stats backfill, repository reads | Week-4 projections, pool, and byes loaded; rerun-safe |
 | 3 | `lineup.py` + tests (property vs brute force) + `recommend.py lineup` | Correct lineup for week 4; `NO_ACTION` when optimal |
-| 4 | Migration 009, persistence, `whoami`, `explain`, `feedback` | Every run persisted, including `NO_ACTION` |
+| 4 | Migration 011, persistence, `whoami`, `explain`, `feedback` | Every run persisted, including `NO_ACTION` |
 | 5 | `waivers.py` (candidates, Δ values, priors, FAAB rule) + `recommend.py waivers` / `scan` | Pre-waiver scan produces ≤ 3 recs or `NO_ACTION` with evidence |
 | 6 | `score_outcomes.py`, lineup backtest, FAAB backtest, calibrated constants | Private backtest report; constants set from data |
 
