@@ -354,10 +354,12 @@ def main() -> None:
             settings = _load_json(run, season, "mSettings") or {}
             boxscore_by_season.setdefault(season, []).append((period, data, settings))
 
-        for season, period_payloads in boxscore_by_season.items():
+        for season, period_payloads in sorted(boxscore_by_season.items()):
             season_id = season_ids.get(season)
             if season_id is None:
                 continue
+            # Clear and reload so reruns replace stale matchup rows cleanly.
+            conn.execute("DELETE FROM matchups WHERE league_season_id=%s", (season_id,))
             for row in norm_matchups.from_boxscore_payloads(season, period_payloads):
                 conn.execute(
                     """INSERT INTO matchups
@@ -365,7 +367,8 @@ def main() -> None:
                             period_type, home_provider_team_id, away_provider_team_id,
                             home_score, away_score, winner, is_bye)
                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                       ON CONFLICT (provider_matchup_id) WHERE provider_matchup_id IS NOT NULL
+                       ON CONFLICT (league_season_id, provider_matchup_id)
+                       WHERE provider_matchup_id IS NOT NULL
                        DO UPDATE SET
                            matchup_period=EXCLUDED.matchup_period,
                            period_type=EXCLUDED.period_type,

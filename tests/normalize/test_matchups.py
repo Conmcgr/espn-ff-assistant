@@ -96,3 +96,17 @@ def test_empty_schedule():
 def test_no_periods():
     rows = from_boxscore_payloads(2024, [])
     assert rows == []
+
+
+def test_same_id_different_seasons_stays_separate():
+    """ESPN uses sequential IDs per season; id=0 in 2015 and 2020 are different matchups."""
+    boxscore = {"schedule": [_entry(0, 1, 2, 100.0, 90.0)]}
+    settings = _settings()
+    rows_2015 = from_boxscore_payloads(2015, [(1, boxscore, settings)])
+    rows_2020 = from_boxscore_payloads(2020, [(1, boxscore, settings)])
+    # Both have provider_matchup_id=0 but they belong to different seasons;
+    # that's handled by using (league_season_id, provider_matchup_id) in the DB.
+    assert rows_2015[0]["provider_matchup_id"] == 0
+    assert rows_2020[0]["provider_matchup_id"] == 0
+    assert rows_2015[0]["winner"] == "home"
+    assert rows_2020[0]["winner"] == "home"
