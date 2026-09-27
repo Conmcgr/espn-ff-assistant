@@ -15,9 +15,14 @@ Usage:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+
+# Run keys of live current-week syncs end with this suffix (see sync.py); only
+# those snapshots carry point-in-time injury status and ownership.
+LIVE_RUN_SUFFIX = "-current"
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -143,6 +148,58 @@ class OwnershipInterval:
 
 
 @dataclass
+class PlayerStatus:
+    provider_player_id: int
+    snapshot_period: int
+    injury_status: str | None
+    eligible_slots: list[int]
+    default_position_id: int | None
+    pro_team_id: int | None
+    percent_owned: float | None
+    percent_change: float | None
+    availability: str
+    on_provider_team_id: int | None
+    waiver_clear_at: datetime | None
+    lineup_locked: bool | None
+    retrieved_at: datetime | None
+
+
+@dataclass
+class ProGame:
+    pro_team_id: int
+    scoring_period: int
+    opponent_pro_team_id: int | None
+    kickoff_at: datetime | None
+    is_bye: bool
+
+
+@dataclass
+class Preference:
+    key: str
+    value: Any
+    weight: float
+    source: str
+
+
+@dataclass
+class StoredRecommendation:
+    id: str
+    provider_team_id: int
+    kind: str
+    season: int
+    scoring_period: int
+    as_of_ts: datetime
+    decision: str
+    summary: str
+    payload: dict[str, Any]
+    alternatives: Any
+    confidence: str | None
+    engine_version: str
+    created_at: datetime
+    evidence: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
 class DraftPick:
     season: int
     overall_pick: int | None
@@ -218,11 +275,12 @@ class Repository:
         if not sid:
             return []
         rows = self._conn.execute(
-            """SELECT t.provider_team_id, t.name, msi.provider_member_id
+            """SELECT t.provider_team_id, t.name, m.provider_member_id
                FROM teams t
                LEFT JOIN manager_season_identities msi
                    ON msi.league_season_id=t.league_season_id
                    AND msi.provider_team_id=t.provider_team_id
+               LEFT JOIN managers m ON m.id=msi.manager_id
                WHERE t.league_season_id=%s
                ORDER BY t.provider_team_id""",
             (sid,),
@@ -410,6 +468,231 @@ class Repository:
             )
             for r in rows
         }
+
+    # ---- Player stats, status, availability (point-in-time) ----------------
+
+    def _stat_values(
+        self,
+        league_id: str,
+        season: int,
+        scoring_period: int,
+        stat_source: str,
+        stat_split: str,
+        player_ids: list[int] | None,
+        max_snapshot_period: int | None,
+        as_of_ts: datetime | None,
+    ) -> dict[int, float]:
+        sid = self._season_id(league_id, season)
+        if not sid:
+            return {}
+        filters = [
+            "league_season_id=%s", "scoring_period=%s", "stat_source=%s", "stat_split=%s",
+            "applied_total IS NOT NULL",
+        ]
+        params: list[Any] = [sid, scoring_period, stat_source, stat_split]
+        if player_ids is not None:
+            filters.append("provider_player_id = ANY(%s)")
+            params.append(player_ids)
+        if max_snapshot_period is not None:
+            filters.append("snapshot_period<=%s")
+            params.append(max_snapshot_period)
+        if as_of_ts is not None:
+            filters.append("retrieved_at<=%s")
+            params.append(as_of_ts)
+        rows = self._conn.execute(
+            f"""SELECT DISTINCT ON (provider_player_id) provider_player_id, applied_total
+                FROM player_week_stats WHERE {" AND ".join(filters)}
+                ORDER BY provider_player_id, snapshot_period DESC, retrieved_at DESC NULLS LAST""",
+            params,
+        ).fetchall()
+        return {r[0]: float(r[1]) for r in rows}
+
+    def week_projections(
+        self,
+        league_id: str,
+        season: int,
+        scoring_period: int,
+        player_ids: list[int] | None = None,
+        as_of_ts: datetime | None = None,
+    ) -> dict[int, float]:
+        """Latest weekly projection for the period retrieved at or before as_of_ts."""
+        return self._stat_values(
+            league_id, season, scoring_period, "projected", "week", player_ids, None, as_of_ts
+        )
+
+    def week_actuals(
+        self, league_id: str, season: int, scoring_period: int, player_ids: list[int] | None = None
+    ) -> dict[int, float]:
+        """Final (latest-retrieved) actual points for a completed period."""
+        return self._stat_values(
+            league_id, season, scoring_period, "actual", "week", player_ids, None, None
+        )
+
+    def ros_projections(
+        self,
+        league_id: str,
+        season: int,
+        as_of_period: int,
+        player_ids: list[int] | None = None,
+        as_of_ts: datetime | None = None,
+    ) -> dict[int, float]:
+        """Rest-of-season projection: current season projection minus season actuals.
+
+        Both come from the latest snapshot taken at or before `as_of_period`.
+        """
+        current = self._stat_values(
+            league_id, season, 0, "projected", "season_current", player_ids, as_of_period, as_of_ts
+        )
+        actual = self._stat_values(
+            league_id, season, 0, "actual", "season", list(current) or [], as_of_period, as_of_ts
+        )
+        return {pid: max(0.0, total - actual.get(pid, 0.0)) for pid, total in current.items()}
+
+    def player_status(
+        self,
+        league_id: str,
+        season: int,
+        period: int,
+        player_ids: list[int] | None = None,
+        as_of_ts: datetime | None = None,
+    ) -> dict[int, PlayerStatus]:
+        """Latest status per player from snapshots at or before `period` (and as_of_ts)."""
+        sid = self._season_id(league_id, season)
+        if not sid:
+            return {}
+        filters = ["league_season_id=%s", "snapshot_period<=%s"]
+        params: list[Any] = [sid, period]
+        if player_ids is not None:
+            filters.append("provider_player_id = ANY(%s)")
+            params.append(player_ids)
+        if as_of_ts is not None:
+            filters.append("retrieved_at<=%s")
+            params.append(as_of_ts)
+        rows = self._conn.execute(
+            f"""SELECT DISTINCT ON (provider_player_id)
+                       provider_player_id, snapshot_period, injury_status, eligible_slots,
+                       default_position_id, pro_team_id, percent_owned, percent_change,
+                       availability, on_provider_team_id, waiver_clear_at, lineup_locked,
+                       retrieved_at
+                FROM player_status_snapshots WHERE {" AND ".join(filters)}
+                ORDER BY provider_player_id, snapshot_period DESC, retrieved_at DESC NULLS LAST""",
+            params,
+        ).fetchall()
+        return {r[0]: self._status(r) for r in rows}
+
+    @staticmethod
+    def _status(r: Any) -> PlayerStatus:
+        return PlayerStatus(
+            provider_player_id=r[0],
+            snapshot_period=r[1],
+            injury_status=r[2],
+            eligible_slots=list(r[3] or []),
+            default_position_id=r[4],
+            pro_team_id=r[5],
+            percent_owned=float(r[6]) if r[6] is not None else None,
+            percent_change=float(r[7]) if r[7] is not None else None,
+            availability=r[8],
+            on_provider_team_id=r[9],
+            waiver_clear_at=r[10],
+            lineup_locked=r[11],
+            retrieved_at=r[12],
+        )
+
+    def available_players(
+        self,
+        league_id: str,
+        season: int,
+        period: int,
+        as_of_ts: datetime | None = None,
+    ) -> list[PlayerStatus]:
+        """Free agents and waiver players from the latest pool snapshot for `period`."""
+        sid = self._season_id(league_id, season)
+        if not sid:
+            return []
+        ts_filter = "AND retrieved_at<=%s" if as_of_ts is not None else ""
+        params: list[Any] = [sid, period] + ([as_of_ts] if as_of_ts is not None else [])
+        latest = self._conn.execute(
+            f"""SELECT sync_run_id FROM player_status_snapshots
+                WHERE league_season_id=%s AND snapshot_period=%s
+                  AND availability IN ('free_agent', 'waivers') {ts_filter}
+                ORDER BY retrieved_at DESC NULLS LAST LIMIT 1""",
+            params,
+        ).fetchone()
+        if not latest:
+            return []
+        rows = self._conn.execute(
+            """SELECT provider_player_id, snapshot_period, injury_status, eligible_slots,
+                      default_position_id, pro_team_id, percent_owned, percent_change,
+                      availability, on_provider_team_id, waiver_clear_at, lineup_locked,
+                      retrieved_at
+               FROM player_status_snapshots
+               WHERE league_season_id=%s AND snapshot_period=%s AND sync_run_id=%s
+                 AND availability IN ('free_agent', 'waivers')
+               ORDER BY percent_owned DESC NULLS LAST""",
+            (sid, period, latest[0]),
+        ).fetchall()
+        return [self._status(r) for r in rows]
+
+    def pro_games(self, season: int, scoring_period: int) -> dict[int, ProGame]:
+        rows = self._conn.execute(
+            """SELECT pro_team_id, scoring_period, opponent_pro_team_id, kickoff_at, is_bye
+               FROM pro_team_games WHERE season=%s AND scoring_period=%s""",
+            (season, scoring_period),
+        ).fetchall()
+        return {r[0]: ProGame(*r) for r in rows}
+
+    def bye_weeks(self, season: int) -> dict[int, list[int]]:
+        """{pro_team_id: [bye periods]} for a season."""
+        rows = self._conn.execute(
+            "SELECT pro_team_id, scoring_period FROM pro_team_games WHERE season=%s AND is_bye",
+            (season,),
+        ).fetchall()
+        byes: dict[int, list[int]] = {}
+        for team, period in rows:
+            byes.setdefault(team, []).append(period)
+        return byes
+
+    def faab_comparables(
+        self, league_id: str, as_of_season: int, as_of_week: int, season_from: int = 2018
+    ) -> list[tuple[int | None, float, float | None]]:
+        """(position_id, winning bid, percent owned at claim) for executed claims up to as-of.
+
+        Ownership comes only from live syncs taken during the claim's period:
+        backfilled historical payloads carry end-of-season ownership, which would
+        leak how the player turned out.
+        """
+        rows = self._conn.execute(
+            """SELECT p.default_position_id, t.bid_amount, pss.percent_owned
+               FROM transactions t
+               JOIN league_seasons ls ON ls.id=t.league_season_id
+               JOIN transaction_items ti ON ti.transaction_id=t.id AND ti.item_type='ADD'
+               LEFT JOIN players p ON p.provider_player_id=ti.provider_player_id
+               LEFT JOIN LATERAL (
+                   SELECT s.percent_owned FROM player_status_snapshots s
+                   JOIN sync_runs sr ON sr.id=s.sync_run_id
+                   WHERE s.league_season_id=t.league_season_id
+                     AND s.provider_player_id=ti.provider_player_id
+                     AND s.snapshot_period=t.scoring_period
+                     AND sr.run_key LIKE %s
+                   ORDER BY s.retrieved_at LIMIT 1
+               ) pss ON true
+               WHERE ls.league_id=%s AND t.category='waiver_claim' AND t.status='EXECUTED'
+                 AND t.bid_amount IS NOT NULL AND ls.season>=%s
+                 AND (ls.season<%s OR (ls.season=%s AND t.scoring_period<=%s))""",
+            (f"%{LIVE_RUN_SUFFIX}", league_id, season_from, as_of_season, as_of_season, as_of_week),
+        ).fetchall()
+        return [(r[0], float(r[1]), float(r[2]) if r[2] is not None else None) for r in rows]
+
+    def latest_roster_period(self, league_id: str, season: int, max_period: int) -> int | None:
+        """Most recent scoring period with roster snapshots, at or before max_period."""
+        sid = self._season_id(league_id, season)
+        if not sid:
+            return None
+        row = self._conn.execute(
+            "SELECT MAX(scoring_period) FROM roster_snapshots WHERE league_season_id=%s AND scoring_period<=%s",
+            (sid, max_period),
+        ).fetchone()
+        return row[0] if row else None
 
     # ---- Rosters -----------------------------------------------------------
 
@@ -754,3 +1037,199 @@ class Repository:
                 ],
             )
         return len(features)
+
+    # ---- Users, identity, preferences --------------------------------------
+
+    def default_user_id(self) -> str | None:
+        row = self._conn.execute(
+            "SELECT id FROM users WHERE external_key='local-primary'"
+        ).fetchone()
+        return str(row[0]) if row else None
+
+    def user_team(self, user_id: str, league_id: str, season: int) -> int | None:
+        row = self._conn.execute(
+            """SELECT ut.provider_team_id FROM user_teams ut
+               JOIN league_seasons ls ON ls.id=ut.league_season_id
+               WHERE ut.user_id=%s AND ls.league_id=%s AND ls.season=%s""",
+            (user_id, league_id, season),
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_user_team(self, user_id: str, league_id: str, season: int, provider_team_id: int) -> None:
+        sid = self._season_id(league_id, season)
+        if not sid:
+            raise ValueError(f"season {season} is not loaded")
+        exists = self._conn.execute(
+            "SELECT 1 FROM teams WHERE league_season_id=%s AND provider_team_id=%s",
+            (sid, provider_team_id),
+        ).fetchone()
+        if not exists:
+            raise ValueError(f"team {provider_team_id} does not exist in {season}")
+        self._conn.execute(
+            """INSERT INTO user_teams (user_id, league_season_id, provider_team_id)
+               VALUES (%s,%s,%s)
+               ON CONFLICT (user_id, league_season_id)
+               DO UPDATE SET provider_team_id=EXCLUDED.provider_team_id""",
+            (user_id, sid, provider_team_id),
+        )
+
+    def preferences(self, user_id: str, league_id: str) -> dict[str, Preference]:
+        rows = self._conn.execute(
+            """SELECT key, value, weight, source FROM user_preferences
+               WHERE user_id=%s AND league_id=%s""",
+            (user_id, league_id),
+        ).fetchall()
+        return {r[0]: Preference(r[0], r[1], float(r[2]), r[3]) for r in rows}
+
+    def set_preference(
+        self, user_id: str, league_id: str, key: str, value: Any, weight: float, source: str
+    ) -> None:
+        self._conn.execute(
+            """INSERT INTO user_preferences (user_id, league_id, key, value, weight, source)
+               VALUES (%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (user_id, league_id, key) DO UPDATE SET
+                   value=EXCLUDED.value, weight=EXCLUDED.weight,
+                   source=EXCLUDED.source, updated_at=now()""",
+            (user_id, league_id, key, json.dumps(value), weight, source),
+        )
+
+    def delete_preference(self, user_id: str, league_id: str, key: str) -> None:
+        self._conn.execute(
+            "DELETE FROM user_preferences WHERE user_id=%s AND league_id=%s AND key=%s",
+            (user_id, league_id, key),
+        )
+
+    # ---- Recommendations -----------------------------------------------------
+
+    def save_recommendation(
+        self,
+        user_id: str,
+        league_id: str,
+        season: int,
+        rec: dict[str, Any],
+        evidence: list[dict[str, Any]],
+    ) -> str:
+        """Persist one recommendation (any decision, including no_action) and its evidence."""
+        sid = self._season_id(league_id, season)
+        if not sid:
+            raise ValueError(f"season {season} is not loaded")
+        rec_id = self._conn.execute(
+            """INSERT INTO recommendations
+                   (user_id, league_season_id, provider_team_id, kind, scoring_period,
+                    as_of_ts, decision, summary, payload, alternatives, confidence,
+                    engine_version)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+            (
+                user_id, sid, rec["provider_team_id"], rec["kind"], rec["scoring_period"],
+                rec["as_of_ts"], rec["decision"], rec["summary"], json.dumps(rec["payload"]),
+                json.dumps(rec.get("alternatives")), rec.get("confidence"), rec["engine_version"],
+            ),
+        ).fetchone()[0]
+        if evidence:
+            with self._conn.cursor() as cur:
+                cur.executemany(
+                    """INSERT INTO recommendation_evidence (recommendation_id, kind, key, value, source)
+                       VALUES (%s,%s,%s,%s,%s)""",
+                    [
+                        (rec_id, e["kind"], e["key"], json.dumps(e["value"]), e.get("source"))
+                        for e in evidence
+                    ],
+                )
+        return str(rec_id)
+
+    def _stored(self, rows: list[Any]) -> list[StoredRecommendation]:
+        return [
+            StoredRecommendation(
+                id=str(r[0]), provider_team_id=r[1], kind=r[2], season=r[3],
+                scoring_period=r[4], as_of_ts=r[5], decision=r[6], summary=r[7],
+                payload=r[8], alternatives=r[9], confidence=r[10], engine_version=r[11],
+                created_at=r[12],
+            )
+            for r in rows
+        ]
+
+    _REC_COLUMNS = """r.id, r.provider_team_id, r.kind, ls.season, r.scoring_period, r.as_of_ts,
+                      r.decision, r.summary, r.payload, r.alternatives, r.confidence,
+                      r.engine_version, r.created_at"""
+
+    def recommendation(self, recommendation_id: str) -> StoredRecommendation | None:
+        rows = self._conn.execute(
+            f"""SELECT {self._REC_COLUMNS} FROM recommendations r
+                JOIN league_seasons ls ON ls.id=r.league_season_id WHERE r.id=%s""",
+            (recommendation_id,),
+        ).fetchall()
+        if not rows:
+            return None
+        rec = self._stored(rows)[0]
+        rec.evidence = [
+            {"kind": e[0], "key": e[1], "value": e[2], "source": e[3]}
+            for e in self._conn.execute(
+                """SELECT kind, key, value, source FROM recommendation_evidence
+                   WHERE recommendation_id=%s ORDER BY kind, key""",
+                (recommendation_id,),
+            ).fetchall()
+        ]
+        return rec
+
+    def recommendations(
+        self,
+        user_id: str,
+        league_id: str,
+        season: int,
+        scoring_period: int | None = None,
+        kind: str | None = None,
+    ) -> list[StoredRecommendation]:
+        filters = ["r.user_id=%s", "ls.league_id=%s", "ls.season=%s"]
+        params: list[Any] = [user_id, league_id, season]
+        if scoring_period is not None:
+            filters.append("r.scoring_period=%s")
+            params.append(scoring_period)
+        if kind:
+            filters.append("r.kind=%s")
+            params.append(kind)
+        rows = self._conn.execute(
+            f"""SELECT {self._REC_COLUMNS} FROM recommendations r
+                JOIN league_seasons ls ON ls.id=r.league_season_id
+                WHERE {" AND ".join(filters)} ORDER BY r.created_at""",
+            params,
+        ).fetchall()
+        return self._stored(rows)
+
+    def save_feedback(
+        self, recommendation_id: str, action: str, reason: str | None = None, note: str | None = None
+    ) -> None:
+        self._conn.execute(
+            """INSERT INTO recommendation_feedback (recommendation_id, action, reason, note)
+               VALUES (%s,%s,%s,%s)""",
+            (recommendation_id, action, reason, note),
+        )
+
+    def feedback(self, recommendation_id: str) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            """SELECT action, reason, note, created_at FROM recommendation_feedback
+               WHERE recommendation_id=%s ORDER BY created_at""",
+            (recommendation_id,),
+        ).fetchall()
+        return [{"action": r[0], "reason": r[1], "note": r[2], "created_at": r[3]} for r in rows]
+
+    def save_outcome(self, recommendation_id: str, outcome: dict[str, Any]) -> None:
+        self._conn.execute(
+            """INSERT INTO recommendation_outcomes
+                   (recommendation_id, observed_action, recommended_points, actual_points,
+                    baseline_points, evaluated_through_period, detail)
+               VALUES (%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (recommendation_id) DO UPDATE SET
+                   observed_action=EXCLUDED.observed_action,
+                   recommended_points=EXCLUDED.recommended_points,
+                   actual_points=EXCLUDED.actual_points,
+                   baseline_points=EXCLUDED.baseline_points,
+                   evaluated_through_period=EXCLUDED.evaluated_through_period,
+                   detail=EXCLUDED.detail,
+                   computed_at=now()""",
+            (
+                recommendation_id, outcome.get("observed_action"),
+                outcome.get("recommended_points"), outcome.get("actual_points"),
+                outcome.get("baseline_points"), outcome.get("evaluated_through_period"),
+                json.dumps(outcome.get("detail")),
+            ),
+        )
