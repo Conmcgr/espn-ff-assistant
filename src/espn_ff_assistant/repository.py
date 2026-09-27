@@ -683,6 +683,26 @@ class Repository:
         ).fetchall()
         return [(r[0], float(r[1]), float(r[2]) if r[2] is not None else None) for r in rows]
 
+    def waiver_claim_bids(
+        self, league_id: str, season_from: int, season_to: int
+    ) -> list[tuple[int, int, datetime | None, int, int | None, int, float, str]]:
+        """(season, period, process_date, player_id, position_id, team_id, bid, status)
+        for executed and failed FAAB claims — the bid landscape of each waiver run."""
+        rows = self._conn.execute(
+            """SELECT ls.season, t.scoring_period, t.process_date, ti.provider_player_id,
+                      p.default_position_id, t.provider_team_id, t.bid_amount, t.status
+               FROM transactions t
+               JOIN league_seasons ls ON ls.id=t.league_season_id
+               JOIN transaction_items ti ON ti.transaction_id=t.id AND ti.item_type='ADD'
+               LEFT JOIN players p ON p.provider_player_id=ti.provider_player_id
+               WHERE ls.league_id=%s AND ls.season BETWEEN %s AND %s
+                 AND t.category='waiver_claim' AND t.bid_amount IS NOT NULL
+                 AND (t.status='EXECUTED' OR t.status LIKE 'FAILED%%')
+               ORDER BY ls.season, t.process_date""",
+            (league_id, season_from, season_to),
+        ).fetchall()
+        return [(r[0], r[1], r[2], r[3], r[4], r[5], float(r[6]), r[7]) for r in rows]
+
     def latest_roster_period(self, league_id: str, season: int, max_period: int) -> int | None:
         """Most recent scoring period with roster snapshots, at or before max_period."""
         sid = self._season_id(league_id, season)

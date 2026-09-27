@@ -110,24 +110,34 @@ def test_free_agent_has_no_bid_and_waiver_bid_clamped_to_budget():
     c = ctx(roster(), comparables=comps, competitors=rivals)
     c.faab_remaining = 50
     bid = suggest_bid(wv, "upgrade", c)
-    assert bid.amount == 50
+    assert bid.amount == 50               # 75th percentile × demand, clamped to budget
     assert bid.comparable_scope == "position+ownership"
     assert len(bid.competitors) == 5
 
 
-def test_bid_scales_with_rival_demand_and_falls_back_scope():
+def test_bid_uses_low_quantile_without_rivals_and_high_with_rivals():
     wv = P("WR", 12, 120, availability="waivers", owned=5)
     comps = [Comparable("WR", float(b), 50.0) for b in (4, 6, 8, 10, 12)]
     no_rivals = suggest_bid(wv, "upgrade", ctx(roster(), comparables=comps))
     assert no_rivals.comparable_scope == "position"
-    assert no_rivals.amount == 8
-    needy = [Competitor(t, 100, {"WR": 0.0}) for t in range(1, 3)]
-    with_rivals = suggest_bid(wv, "upgrade", ctx(roster(), comparables=comps, competitors=needy))
-    assert with_rivals.amount == round(8 * 1.3)
+    assert no_rivals.amount == 6          # 25th percentile
+    assert no_rivals.competitors == []
+    one = [Competitor(1, 100, {"WR": 0.0})]
+    assert suggest_bid(wv, "upgrade", ctx(roster(), comparables=comps, competitors=one)).amount == 10
+    three = [Competitor(t, 100, {"WR": 0.0}) for t in range(1, 4)]
+    assert suggest_bid(wv, "upgrade", ctx(roster(), comparables=comps, competitors=three)).amount == 13
 
 
-def test_stream_bid_capped_at_low_quartile():
+def test_rival_without_need_or_budget_does_not_count():
+    wv = P("WR", 12, 120, availability="waivers")
+    comps = [Comparable("WR", float(b), None) for b in (4, 6, 8, 10, 12)]
+    rivals = [Competitor(1, 100, {"WR": 15.0}), Competitor(2, 0, {"WR": 0.0})]
+    assert suggest_bid(wv, "upgrade", ctx(roster(), comparables=comps, competitors=rivals)).competitors == []
+
+
+def test_stream_bid_stays_at_low_quantile_even_with_rivals():
     wv = P("DST", 9, 40, availability="waivers")
     comps = [Comparable("DST", float(b), None) for b in (1, 2, 3, 10, 20)]
-    bid = suggest_bid(wv, "stream", ctx(roster(), comparables=comps))
-    assert bid.amount <= bid.low
+    rivals = [Competitor(1, 100, {"DST": 0.0})]
+    bid = suggest_bid(wv, "stream", ctx(roster(), comparables=comps, competitors=rivals))
+    assert bid.amount == bid.low == 2
