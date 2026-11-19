@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from espn_ff_assistant.archive import RawArchive
 from espn_ff_assistant.config import ConfigurationError, Settings
 from espn_ff_assistant.coverage import build_coverage, write_coverage
 from espn_ff_assistant.espn_client import ESPNClient
+from espn_ff_assistant.object_store import from_url
 
 BASE_VIEWS = ("mStatus", "mSettings", "mTeam", "mDraftDetail", "mSchedule", "mStandings")
 
@@ -26,6 +28,7 @@ def fetch_and_save(client, archive, season, view, **kwargs):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--start-season", type=int)
+    parser.add_argument("--archive-url", help="Private archive store URL (or RAW_ARCHIVE_URL)")
     parser.add_argument("--end-season", type=int)
     parser.add_argument("--season", type=int, help="scan one season only")
     parser.add_argument("--resume", help="existing run ID under data/raw")
@@ -66,7 +69,9 @@ def main() -> int:
     end = args.end_season or settings.last_season
     seasons = [args.season] if args.season else list(range(start, end + 1))
     run_id = args.resume or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    archive = RawArchive(args.raw_root, run_id)
+    archive_url = args.archive_url or os.environ.get("RAW_ARCHIVE_URL")
+    archive = RawArchive(args.raw_root, run_id, league_id=settings.league_id,
+                         store=from_url(archive_url) if archive_url else None)
     client = ESPNClient(settings, delay=args.request_delay)
     for season in seasons:
         print(f"Scanning {season}...")
