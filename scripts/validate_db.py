@@ -134,7 +134,7 @@ def check_rosters(conn, league_id, season_ids, season_filter, r: Results) -> Non
             """
             SELECT rs.scoring_period, re.provider_player_id, count(*)
             FROM roster_entries re
-            JOIN roster_snapshots rs ON rs.id = re.roster_snapshot_id
+            JOIN latest_roster_snapshots rs ON rs.id = re.roster_snapshot_id
             WHERE rs.league_season_id=%s
             GROUP BY rs.scoring_period, re.provider_player_id
             HAVING count(*) > 1
@@ -146,7 +146,7 @@ def check_rosters(conn, league_id, season_ids, season_filter, r: Results) -> Non
             r.fail(f"Roster uniqueness {season}", f"{len(dupes)} duplicate player-week entries (sample: {dupes[0]})")
         else:
             snap_count = conn.execute(
-                "SELECT count(*) FROM roster_snapshots WHERE league_season_id=%s", (sid,)
+                "SELECT count(*) FROM latest_roster_snapshots WHERE league_season_id=%s", (sid,)
             ).fetchone()[0]
             r.ok(f"Roster uniqueness {season}", f"{snap_count} snapshot(s), no duplicates")
 
@@ -367,7 +367,7 @@ def check_roster_transaction_coverage(conn, league_id, season_ids, r: Results) -
             """
             SELECT count(DISTINCT (rs.scoring_period, re.provider_player_id, rs.provider_team_id))
             FROM roster_entries re
-            JOIN roster_snapshots rs ON rs.id=re.roster_snapshot_id
+            JOIN latest_roster_snapshots rs ON rs.id=re.roster_snapshot_id
             WHERE rs.league_season_id=%s AND re.acquisition_type NOT IN ('DRAFT','') AND re.acquisition_type IS NOT NULL
             """,
             (sid,),
