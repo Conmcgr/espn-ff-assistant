@@ -241,7 +241,7 @@ def load_run(run: Path, sections: frozenset[str] = frozenset(SECTIONS)) -> dict[
                 continue
             retrieved_at[raw_uri] = entry.get("retrieved_at")
             path = run / raw_uri
-            digest = entry.get("sha256") or _sha256(path)
+            digest = _sha256(path)
             conn.execute(
                 """INSERT INTO raw_payloads
                        (sync_run_id, season, view_name, scoring_period, payload_uri,
