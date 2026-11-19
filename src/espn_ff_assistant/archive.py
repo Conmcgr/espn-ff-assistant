@@ -8,7 +8,6 @@ import logging
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 
 from .espn_client import FetchResult
 from .object_store import ObjectStore, safe_key
@@ -112,11 +111,11 @@ class RawArchive:
             "season": result.season,
             "view": result.view,
             "scoring_period": result.scoring_period,
-            "url": urlunsplit((urlsplit(result.url).scheme, urlsplit(result.url).hostname or "", urlsplit(result.url).path, "", "")),
+            "url": result.url,
             "retrieved_at": result.retrieved_at,
             "status_code": result.status_code,
             "state": result.state,
-            "error": "fetch_failed" if result.error else None,
+            "error": result.error,
             "archive_key": result.archive_key,
         }
         entry["raw_path"] = (

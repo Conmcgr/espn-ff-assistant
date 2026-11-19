@@ -69,7 +69,8 @@ def test_round_trip_restart_and_integrity(store, tmp_path, caplog):
     archive = RawArchive(tmp_path / "cache", "same-run", league_id=1, store=store)
     path = archive.save(result())
     entry = json.loads(archive.manifest.read_text())
-    assert "synthetic-secret" not in archive.manifest.read_text()
+    assert entry["url"] == result().url
+    assert entry["error"] is None
     key = "leagues/1/runs/same-run/" + entry["raw_path"]
     assert entry["object_uri"] == store.uri(key)
     assert entry["bytes"] == len(store.get(key))
@@ -128,8 +129,10 @@ def test_old_manifest_and_empty_failed(tmp_path):
     archive = RawArchive(tmp_path, "states")
     archive.save(result(payload={}))
     assert archive.load(2026, "mStatus") == {}
-    assert archive.save(result(payload=None, state="failed", error="synthetic-secret")) is None
-    assert "synthetic-secret" not in archive.manifest.read_text()
+    assert archive.save(result(payload=None, state="failed", error="Timeout")) is None
+    entry = json.loads(archive.manifest.read_text().splitlines()[-1])
+    assert entry["error"] == "Timeout"
+    assert entry["url"] == result().url
 
 
 def test_validation_and_file_factory(tmp_path):

@@ -1,20 +1,5 @@
 # ESPN Fantasy Football Assistant
 
-### Private raw archive backends
-
-The default archive remains local under `data/raw/<run_id>`. Set
-`RAW_ARCHIVE_URL` (or pass `--archive-url` to scan/sync) to
-`file:///absolute/private/path` or `gs://private-bucket/prefix` for durable
-payloads and manifests, namespaced by league and run. GCS requires
-`uv sync --extra gcs` and operator-managed private bucket IAM (never public access).
-Fresh containers hydrate the local cache from the durable manifest; SHA-256
-digests detect tampering on hydration and load. Older unhashed manifests remain readable.
-Use `uv run python scripts/prune_archive.py --archive-url URL --league-id ID --dry-run`
-to preview retention, then omit `--dry-run` to delete. Defaults retain 400 days
-and always protect the newest five runs in that league; runs missing creation
-metadata are conservatively retained. Protect both the local cache and bucket:
-raw payloads contain private member identifiers and are never log material.
-
 Persistence and manager-analytics foundation for the proactive fantasy-football
 agent described in [the project handoff](fantasy_football_agent_handoff_detailed.md).
 
@@ -38,6 +23,15 @@ uv sync --extra dev
 uv run python scripts/check_setup.py
 uv run pytest
 ```
+
+## Private raw archive backends
+
+Archives stay local under `data/raw/<run_id>`; optionally set `RAW_ARCHIVE_URL` or scan/sync's `--archive-url`
+to `file:///absolute/private/path` or `gs://private-bucket/prefix` for league/run-scoped durable storage.
+GCS requires `uv sync --extra gcs` and private bucket IAM; protect raw payloads containing member identifiers.
+Fresh containers hydrate from durable manifests; SHA-256 checks protect hydration and load (legacy manifests still work).
+Preview retention with `uv run python scripts/prune_archive.py --archive-url URL --league-id ID --dry-run`; omit `--dry-run` to delete.
+Defaults retain 400 days and protect the newest five runs; runs without creation metadata are retained.
 
 ## Repository layout
 
