@@ -8,6 +8,7 @@ from espn_ff_assistant.rival_signals import (
     NEUTRAL,
     OBSERVED,
     _Signals,
+    completed_matchup_period,
     faab_signals,
     link_trade_responses,
     position_need,
@@ -243,3 +244,9 @@ def test_league_response_rate_counts_each_linked_response_once_including_departe
     trade_signals(signals, _scope(1), {2025: txns}, {}, {})
     row = _by_name(signals)["trade_received_accept_rate_linked"]
     assert (row.value, row.basis) == (1.0, LEAGUE_FALLBACK)
+
+
+def test_multiweek_matchup_period_counts_only_once_all_its_weeks_are_played():
+    settings = {"scheduleSettings": {"matchupPeriods": {"1": [1], "2": [2, 3], "3": [4]}}}
+    assert [completed_matchup_period(settings, w) for w in (0, 1, 2, 3, 4)] == [0, 1, 1, 2, 3]
+    assert completed_matchup_period({}, 5) == 5

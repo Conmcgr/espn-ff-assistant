@@ -301,6 +301,14 @@ def faab_signals(
 # Standings and playoff context
 # ---------------------------------------------------------------------------
 
+def completed_matchup_period(settings: dict[str, Any], as_of_week: int) -> int:
+    """Last matchup period whose scoring weeks all fall at or before as_of_week."""
+    periods = (settings.get("scheduleSettings") or {}).get("matchupPeriods") or {}
+    if not periods:
+        return as_of_week
+    return max((int(k) for k, weeks in periods.items() if weeks and max(weeks) <= as_of_week), default=0)
+
+
 def standings_signals(
     signals: _Signals, standings: list[TeamRecord], playoff_seats: int | None
 ) -> None:
@@ -350,7 +358,7 @@ def compute_rival_signals(
         for k, v in ((settings.get("rosterSettings") or {}).get("lineupSlotCounts") or {}).items()
     }
     playoff_seats = (settings.get("scheduleSettings") or {}).get("playoffTeamCount")
-    standings = repo.standings_as_of(league_id, as_of_season, as_of_week)
+    standings = repo.standings_as_of(league_id, as_of_season, completed_matchup_period(settings, as_of_week))
 
     roster_week = repo.latest_roster_period(league_id, as_of_season, as_of_week)
     roster = repo.roster_at(league_id, as_of_season, roster_week) if roster_week is not None else []
