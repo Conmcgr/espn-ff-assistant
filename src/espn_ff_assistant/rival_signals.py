@@ -250,7 +250,7 @@ def trade_signals(
     signals.rate("trade_one_for_one_share", _Rate(one_for_one, n), _Rate(league_one_for_one, len(league_completed)), trade_prov)
     signals.add(
         "trade_top_partner_share",
-        max(partners.values()) / n if n >= MIN_TEAM_SAMPLE else None,
+        max(partners.values(), default=0) / n if n >= MIN_TEAM_SAMPLE else None,
         n, trade_prov, seasons, OBSERVED if n >= MIN_TEAM_SAMPLE else NEUTRAL,
     )
     for pos in POSITION_SLOTS:

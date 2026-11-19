@@ -211,3 +211,12 @@ def test_standings_rank_and_distance_to_playoff_line():
     preseason = _Signals(1, WINDOW)
     standings_signals(preseason, [TeamRecord(1, 0, 0, 0, 0, 0)], playoff_seats=2)
     assert {r.basis for r in preseason.rows} == {NEUTRAL}
+
+
+def test_top_partner_share_is_zero_when_all_history_is_with_current_co_owners():
+    # Two managers who now co-own team 1 traded with each other as teams 5 and 6.
+    txns = {2025: [_trade(f"c{i}", "completed_trade", [(i, 5, 6), (10 + i, 6, 5)], season=2025) for i in range(3)]}
+    scope = ManagerScope("team:2026:1", None, {2026: {1}, 2025: {5, 6}}, shared_team=True)
+    signals = _Signals(1, WINDOW)
+    trade_signals(signals, scope, [scope], txns, {}, {})
+    assert _by_name(signals)["trade_top_partner_share"].value == 0
