@@ -38,13 +38,12 @@ class RawArchive:
         self.manifest = self.run_dir / "manifest.jsonl"
         if store is not None:
             remote_manifest = self.prefix + "manifest.jsonl"
-            if store.exists(remote_manifest):
-                content = store.get(remote_manifest)
+            local_manifest = self.manifest.exists()
+            if local_manifest or store.exists(remote_manifest):
+                content = self.manifest.read_bytes() if local_manifest else store.get(remote_manifest)
                 entries = [json.loads(line) for line in content.splitlines()]
                 latest = {entry["raw_path"]: entry for entry in entries if entry.get("raw_path")}
                 for entry in latest.values():
-                    if not entry.get("raw_path"):
-                        continue
                     path = self._path(entry["raw_path"])
                     if not path.exists():
                         data = store.get(self.prefix + entry["raw_path"])
@@ -55,8 +54,20 @@ class RawArchive:
                         temporary.replace(path)
                     else:
                         self._verify(path.read_bytes(), entry)
-                self.manifest.write_bytes(content)
-                logger.info("Hydrated archive: %d entries", len(entries))
+                    object_key = self.prefix + entry["raw_path"]
+                    if local_manifest and not store.exists(object_key):
+                        store.put(object_key, path.read_bytes())
+                if local_manifest:
+                    for entry in entries:
+                        if entry.get("raw_path"):
+                            entry["object_uri"] = store.uri(self.prefix + entry["raw_path"])
+                    content = "".join(json.dumps(entry, sort_keys=True) + "\n" for entry in entries).encode()
+                    self.manifest.write_bytes(content)
+                    store.put(remote_manifest, content)
+                    logger.info("Published local archive: %d entries", len(entries))
+                else:
+                    self.manifest.write_bytes(content)
+                    logger.info("Hydrated archive: %d entries", len(entries))
             run_key = self.prefix + "run.json"
             if not store.exists(run_key):
                 store.put(run_key, json.dumps({"created_at": datetime.now(UTC).isoformat()}).encode())

@@ -145,3 +145,57 @@ def test_validation_and_file_factory(tmp_path):
         RawArchive(tmp_path, "run", store=store)
     with pytest.raises(ValueError):
         from_url("gs://bucket/path?secret=value")
+
+
+def test_attach_store_publishes_cached_payloads(store, tmp_path):
+    archive = RawArchive(tmp_path / "cache", "resume")
+    archive.save(result())
+    archive.save(result(view="mSettings", payload={}))
+    archive.save(result(view="mTeam", payload=None, state="failed", error="Timeout"))
+    attached = RawArchive(tmp_path / "cache", "resume", league_id=1, store=store)
+    entries = [json.loads(line) for line in attached.manifest.read_text().splitlines()]
+    for entry in entries[:2]:
+        key = "leagues/1/runs/resume/" + entry["raw_path"]
+        assert store.get(key) == (attached.run_dir / entry["raw_path"]).read_bytes()
+        assert entry["object_uri"] == store.uri(key)
+    assert entries[2]["raw_path"] is None
+    shutil.rmtree(attached.run_dir)
+    hydrated = RawArchive(tmp_path / "cache", "resume", league_id=1, store=store)
+    assert hydrated.load(2026, "mStatus") == result().payload
+    assert hydrated.load(2026, "mSettings") == {}
+
+
+def test_reopen_preserves_manifest_after_failed_upload(store, tmp_path, monkeypatch):
+    archive = RawArchive(tmp_path / "cache", "resume", league_id=1, store=store)
+    archive.save(result())
+    original_put = store.put
+    manifest_key = "leagues/1/runs/resume/manifest.jsonl"
+    remote_before = store.get(manifest_key)
+
+    def fail_manifest(key, data):
+        if key == manifest_key:
+            raise OSError("Synthetic upload failure")
+        original_put(key, data)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "put", fail_manifest)
+        with pytest.raises(OSError, match="Synthetic upload failure"):
+            archive.save(result(view="mSettings", payload={"new": True}))
+    local_before = archive.manifest.read_bytes()
+    assert local_before != remote_before
+    reopened = RawArchive(tmp_path / "cache", "resume", league_id=1, store=store)
+    assert reopened.manifest.read_bytes() == local_before
+    assert store.get(manifest_key) == local_before
+    assert reopened.load(2026, "mSettings") == {"new": True}
+    shutil.rmtree(reopened.run_dir)
+    hydrated = RawArchive(tmp_path / "cache", "resume", league_id=1, store=store)
+    assert hydrated.load(2026, "mSettings") == {"new": True}
+
+
+def test_attach_store_verifies_local_payload_before_publishing(store, tmp_path):
+    archive = RawArchive(tmp_path / "cache", "resume")
+    path = archive.save(result())
+    path.write_text("{}")
+    with pytest.raises(ArchiveIntegrityError, match="SHA-256"):
+        RawArchive(tmp_path / "cache", "resume", league_id=1, store=store)
+    assert not store.list("leagues/1/runs/resume/")
