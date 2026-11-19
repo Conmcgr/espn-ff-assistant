@@ -24,6 +24,7 @@ from .sync import sync_current
 MAX_INPUT_AGE = timedelta(minutes=15)
 SEASON_INPUTS = ("mStatus", "mSettings", "mTeam", "proTeamSchedules_wl")
 WEEK_INPUTS = ("mRoster", "mTransactions2", "kona_player_info")
+PLAYER_MOVE_TYPES = ("WAIVER", "FREEAGENT", "TRADE_ACCEPT", "ROSTER", "FUTURE_ROSTER")
 OPERATIONAL_ERRORS = (
     Error, RequestException, OSError, KeyError, ValueError,
     AttributeError, TypeError, SystemExit, engine.EngineError,
@@ -110,7 +111,8 @@ def _view_state(view: str, payload: dict[str, Any], scope: WorkerScope, team_ids
     if view == "mTransactions2":
         txns = payload.get("transactions")
         if _objects(txns) and all(
-            tx.get("id") and tx.get("status") and tx.get("type") and _objects(tx.get("items", []))
+            tx.get("id") and tx.get("status") and tx.get("type") and _objects(tx.get("items"))
+            and (tx["type"] not in PLAYER_MOVE_TYPES or tx["items"])
             for tx in txns
         ):
             return "present" if txns else "valid_empty"
