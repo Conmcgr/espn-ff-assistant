@@ -199,3 +199,15 @@ def test_attach_store_verifies_local_payload_before_publishing(store, tmp_path):
     with pytest.raises(ArchiveIntegrityError, match="SHA-256"):
         RawArchive(tmp_path / "cache", "resume", league_id=1, store=store)
     assert not store.list("leagues/1/runs/resume/")
+
+
+def test_publish_offline_payload_update_overwrites_remote_object(store, tmp_path):
+    archive = RawArchive(tmp_path / "cache", "resume", league_id=1, store=store)
+    archive.save(result())
+    offline = RawArchive(tmp_path / "cache", "resume")
+    updated = {"updated": True}
+    offline.save(result(payload=updated))
+    published = RawArchive(tmp_path / "cache", "resume", league_id=1, store=store)
+    assert published.load(2026, "mStatus") == updated
+    hydrated = RawArchive(tmp_path / "fresh", "resume", league_id=1, store=store)
+    assert hydrated.load(2026, "mStatus") == updated

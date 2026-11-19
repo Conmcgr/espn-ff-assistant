@@ -55,7 +55,7 @@ class RawArchive:
                     else:
                         self._verify(path.read_bytes(), entry)
                     object_key = self.prefix + entry["raw_path"]
-                    if local_manifest and not store.exists(object_key):
+                    if local_manifest:
                         store.put(object_key, path.read_bytes())
                 if local_manifest:
                     for entry in entries:
