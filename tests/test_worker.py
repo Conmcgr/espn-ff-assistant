@@ -4,16 +4,21 @@ import json
 import os
 import runpy
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Barrier
+from uuid import uuid4
 
 import pytest
 
+from espn_ff_assistant import engine
 from espn_ff_assistant.config import Settings
 from espn_ff_assistant.database import apply_migrations, connection
 from espn_ff_assistant.espn_client import ESPNClient, FetchResult
 from espn_ff_assistant.loader import load_run
+from espn_ff_assistant.notifications import evaluate
 from espn_ff_assistant.repository import Repository
 from espn_ff_assistant.sync import sync_current
 from espn_ff_assistant.worker import WorkerScope, _check_views
@@ -112,9 +117,11 @@ def test_required_view_states(payloads, view, variant, expected):
     assert states[view] == expected
 
 
-def _invoke_worker(monkeypatch, capsys, *, league_id=SCOPE.league_id, team_id=SCOPE.team_id, user_id=SCOPE.user_id):
+def _invoke_worker(monkeypatch, capsys, *, league_id=SCOPE.league_id, team_id=SCOPE.team_id,
+                   user_id=SCOPE.user_id, extra=()):
     argv = ["worker.py", "--league", str(league_id), "--user", user_id, "--team", str(team_id),
             "--season", str(SCOPE.season), "--week", str(SCOPE.scoring_period)]
+    argv.extend(extra)
     monkeypatch.setattr(sys, "argv", argv)
     with pytest.raises(SystemExit) as exc:
         runpy.run_path(str(ROOT / "scripts" / "worker.py"), run_name="__main__")
@@ -213,3 +220,110 @@ def test_worker_cli_shadow_round_trip(tmp_path, monkeypatch, capsys, payloads):
     assert code == 0 and quiet["status"] == "NO_ACTION" and not quiet["alert_eligible"]
     assert quiet["views"]["kona_player_info"] == quiet["views"]["mTransactions2"] == "valid_empty"
     assert quiet["decisions"] == {"lineup": {"no_action": 1}, "waiver": {"no_action": 1}}
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="set TEST_DATABASE_URL")
+def test_outbox_sequence_and_concurrency(tmp_path, monkeypatch, capsys, payloads):
+    espn_league = 800_000_000 + uuid4().int % 100_000_000
+    payloads["mSettings"]["id"] = espn_league
+    monkeypatch.setenv("DATABASE_URL", os.environ["TEST_DATABASE_URL"])
+    monkeypatch.setenv("ESPN_LEAGUE_ID", str(espn_league))
+    monkeypatch.setenv("ESPN_S2", "synthetic-only")
+    monkeypatch.setenv("ESPN_SWID", "synthetic-only")
+    monkeypatch.chdir(tmp_path)
+    apply_migrations(ROOT / "migrations")
+    now = datetime(2026, 10, 1, 18, tzinfo=UTC)
+
+    def fetch(self, season, view, *, scoring_period=None, **kwargs):
+        return _fetch(view, payloads.get(view, {}), now, scoring_period)
+
+    monkeypatch.setattr(ESPNClient, "fetch", fetch)
+    initial = sync_current(Settings.from_env(), Path("data/raw"), season=SCOPE.season,
+                           scoring_period=SCOPE.scoring_period, load=False)
+    load_run(initial.run_dir)
+    with connection() as conn:
+        repo = Repository(conn)
+        user = repo.default_user_id()
+        league = repo.league_id(espn_league, user_id=user)
+        repo.set_user_team(user, league, SCOPE.season, SCOPE.team_id)
+
+    def invoke(label):
+        code, result = _invoke_worker(monkeypatch, capsys, user_id=user, league_id=espn_league,
+                                     extra=["--outbox", "--now", now.isoformat()])
+        assert code == 0, result
+        with capsys.disabled():
+            for row in result["outbox"]:
+                print(f"{label} | {row['kind']} | {row['disposition']} | {row['reason']}")
+        return result["outbox"]
+
+    assert invoke("daytime")[0]["disposition"] == "send"
+    assert invoke("retry")[0]["reason"] == "duplicate"
+    now = datetime(2026, 10, 2, 13, 55, tzinfo=UTC)
+    roster = payloads["mRoster"]["teams"][0]["roster"]["entries"]
+    roster[1]["playerId"] = 115
+    roster[1]["playerPoolEntry"]["player"]["id"] = 115
+    assert invoke("quiet new move")[0]["disposition"] == "batch"
+    roster[0]["playerPoolEntry"]["player"]["injuryStatus"] = "OUT"
+    urgent = invoke("quiet urgent")
+    assert urgent[0]["disposition"] == "send" and urgent[0]["reason"] == "escalated"
+    with connection() as conn:
+        history = Repository(conn).notification_history(user, league, SCOPE.season, now)
+        assert any(h["dedupe_key"] == urgent[0]["dedupe_key"] and h["urgency"] == "notify"
+                   and h["status"] == "failed" for h in history)
+    assert invoke("urgent retry")[0]["reason"] == "duplicate"
+    roster[0]["lineupSlotId"], roster[1]["lineupSlotId"] = 20, 0
+    payloads["kona_player_info"]["players"] = []
+    with connection() as conn:
+        before = len(Repository(conn).notification_history(user, league, SCOPE.season, now))
+    assert all(r["reason"] == "not_actionable" for r in invoke("no action"))
+    with connection() as conn:
+        repo = Repository(conn)
+        assert len(repo.notification_history(user, league, SCOPE.season, now)) == before
+        ctx = engine.context(repo, league, user, SCOPE.season, SCOPE.scoring_period, now)
+        batch = engine.run_lineup(ctx)
+        rec = batch.records[0]
+        rec.update(decision="notify", payload={"moves": [{"player_id": 999, "from": "Bench", "to": "QB"}]})
+        choice = evaluate([rec], [], {}, now, user_id=user, league_season_id=str(league))[0]
+        # Unknown deadline still allows the digest five minutes from now.
+        assert choice["disposition"] == "batch"
+
+    with connection() as conn:
+        before_recs = len(Repository(conn).recommendations(user, league, SCOPE.season))
+
+    def fail_enqueue(*args, **kwargs):
+        raise ValueError("synthetic enqueue failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Repository, "enqueue_notification", fail_enqueue)
+        code, failed = _invoke_worker(patch, capsys, user_id=user, league_id=espn_league,
+                                     extra=["--outbox", "--now", now.isoformat()])
+        assert code == 1 and failed["error"] == "ValueError" and not failed["outbox"]
+    with connection() as conn:
+        repo = Repository(conn)
+        assert len(repo.recommendations(user, league, SCOPE.season)) == before_recs
+        assert len(repo.notification_history(user, league, SCOPE.season, now)) == before
+
+    barrier = Barrier(2)
+
+    def enqueue(concurrent=False):
+        with connection() as conn:
+            repo = Repository(conn)
+            rid = repo.save_recommendation(user, league, SCOPE.season, rec, [])
+            if concurrent:
+                barrier.wait(timeout=10)
+            return repo.enqueue_notification(rid, user, league, SCOPE.season,
+                                             SCOPE.scoring_period, choice, now)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: enqueue(concurrent=True), range(2)))
+    assert sum(r is not None for r in results) == 1
+    assert enqueue() is None
+    with connection() as conn:
+        repo = Repository(conn)
+        assert sum(h["dedupe_key"] == choice["dedupe_key"]
+                   for h in repo.notification_history(user, league, SCOPE.season, now)) == 1
+        assert all(r["expires_at"] > now for r in repo.due_notifications(now))
+        assert not any(r["id"] == results[0] or r["id"] == results[1]
+                       for r in repo.due_notifications(now + timedelta(minutes=16)))
+    with capsys.disabled():
+        print("concurrent enqueue + retry | exactly one intent; NO_ACTION | zero new intents; enqueue failure | atomic rollback")

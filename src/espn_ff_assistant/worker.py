@@ -1,4 +1,4 @@
-"""One live, explicitly scoped recommendation scan. No delivery or decision writes."""
+"""One scoped scan; optionally persist intents, never deliver notifications."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any
 from psycopg import Error, IsolationLevel
 from requests import RequestException
 
-from . import engine
+from . import engine, notifications
 from .config import ConfigurationError, Settings
 from .database import connection
 from .espn_client import FetchResult
@@ -50,6 +50,7 @@ class WorkerResult:
     views: dict[str, str] = field(default_factory=dict)
     decisions: dict[str, dict[str, int]] = field(default_factory=dict)
     error: str | None = None
+    outbox: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _objects(value: Any) -> bool:
@@ -210,7 +211,8 @@ def _roster_matches_run(repo: Repository, league: str, scope: WorkerScope, fetch
     return observed == loaded
 
 
-def run_once(settings: Settings, scope: WorkerScope, raw_root: Path = Path("data/raw")) -> WorkerResult:
+def run_once(settings: Settings, scope: WorkerScope, raw_root: Path = Path("data/raw"),
+             *, outbox: bool = False, now: datetime | None = None) -> WorkerResult:
     result = WorkerResult(scope, "SCOPE_REJECTED")
     if settings.league_id != scope.league_id:
         result.error = "configured_league_mismatch"
@@ -228,7 +230,7 @@ def run_once(settings: Settings, scope: WorkerScope, raw_root: Path = Path("data
         sync = sync_current(settings, raw_root / f"league-{scope.league_id}", season=scope.season,
                             scoring_period=scope.scoring_period, load=False)
         result.run_id = sync.run_dir.name
-        result.views, observed = _check_views(sync.fetches, scope, datetime.now(UTC))
+        result.views, observed = _check_views(sync.fetches, scope, now or datetime.now(UTC))
         if observed is None or not set(result.views.values()) <= {"present", "valid_empty"}:
             result.error = "required_views_not_ready"
             return result
@@ -236,7 +238,7 @@ def run_once(settings: Settings, scope: WorkerScope, raw_root: Path = Path("data
         load_run(sync.run_dir)
         result.status = "EVALUATION_FAILED"
         with connection() as conn:
-            conn.isolation_level = IsolationLevel.REPEATABLE_READ
+            conn.isolation_level = IsolationLevel.READ_COMMITTED if outbox else IsolationLevel.REPEATABLE_READ
             repo = Repository(conn)
             if _league_for_scope(repo, scope) != league:
                 result.status, result.error = "SCOPE_REJECTED", "mapping_changed"
@@ -247,20 +249,50 @@ def run_once(settings: Settings, scope: WorkerScope, raw_root: Path = Path("data
                 result.error = "loaded_snapshot_mismatch"
                 return result
             repo = Repository(conn, player_sync_id=sync_id)
-            ctx = engine.context(repo, league, scope.user_id, scope.season, scope.scoring_period)
+            ctx = engine.context(repo, league, scope.user_id, scope.season, scope.scoring_period,
+                                 as_of_ts=now)
             results = (
                 engine.run_lineup(ctx),
                 engine.run_waivers(ctx, allow_empty_pool=result.views["kona_player_info"] == "valid_empty"),
             )
-        now = datetime.now(UTC)
-        if now - observed > MAX_INPUT_AGE:
-            result.views, _ = _check_views(sync.fetches, scope, now)
-            result.status, result.error = "SYNC_FAILED", "required_views_expired"
-            return result
+            evaluated_at = now or datetime.now(UTC)
+            if evaluated_at - observed > MAX_INPUT_AGE:
+                result.views, _ = _check_views(sync.fetches, scope, evaluated_at)
+                result.status, result.error = "SYNC_FAILED", "required_views_expired"
+                return result
+            if outbox:
+                # Serialize policy reads and cap accounting across ticks for this user.
+                repo.lock_notification_scope(scope.user_id, league)
+                evaluated_at = now or datetime.now(UTC)
+                if evaluated_at - observed > MAX_INPUT_AGE:
+                    result.status, result.error = "SYNC_FAILED", "required_views_expired"
+                    return result
+                history = repo.notification_history(scope.user_id, league, scope.season, evaluated_at)
+                records = [r for batch in results for r in batch.records]
+                kickoffs = [g.kickoff_at for g in repo.pro_games(scope.season, scope.scoring_period).values()
+                            if g.kickoff_at is not None]
+                if kickoffs:
+                    for rec in records:
+                        if rec["kind"] == "lineup":
+                            rec["payload"]["expires_at"] = min(kickoffs).isoformat()
+                choices = notifications.evaluate(
+                    records, history, {k: p.value for k, p in repo.preferences(scope.user_id, league).items()},
+                    evaluated_at, user_id=scope.user_id, league_season_id=f"{league}:{scope.season}",
+                )
+                ids = [rid for batch in results for rid in engine.save(ctx, batch)]
+                for rec, rid, choice in zip(records, ids, choices, strict=True):
+                    intent = repo.enqueue_notification(rid, scope.user_id, league, scope.season,
+                                                       scope.scoring_period, choice, evaluated_at)
+                    if choice["disposition"] != "suppress" and intent is None:
+                        choice.update(disposition="suppress", reason="duplicate")
+                    result.outbox.append({"recommendation_id": rid, "kind": rec["kind"],
+                                          **{k: v.isoformat() if isinstance(v, datetime) else v
+                                             for k, v in choice.items()}})
     except ConfigurationError as exc:
         result.status, result.error = "CONFIGURATION_ERROR", str(exc)
         return result
     except OPERATIONAL_ERRORS as exc:
+        result.outbox.clear()
         result.error = type(exc).__name__
         return result
     records = [r for batch in results for r in batch.records]

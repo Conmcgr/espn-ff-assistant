@@ -1139,6 +1139,51 @@ class Repository:
 
     # ---- Recommendations -----------------------------------------------------
 
+    def notification_history(self, user_id, league_id, season, now):
+        sid = self._season_id(league_id, season)
+        rows = self._conn.execute(
+            """SELECT dedupe_key, urgency, disposition, status, created_at
+               FROM notification_outbox WHERE user_id=%s AND league_season_id=%s
+               AND created_at<=%s""", (user_id, sid, now),
+        ).fetchall()
+        return [dict(zip(("dedupe_key", "urgency", "disposition", "status", "created_at"), r, strict=True)) for r in rows]
+
+    def enqueue_notification(self, recommendation_id, user_id, league_id, season, period, row, now):
+        if row["disposition"] == "suppress":
+            return None
+        sid = self._season_id(league_id, season)
+        result = self._conn.execute(
+            """INSERT INTO notification_outbox
+               (recommendation_id, user_id, league_season_id, scoring_period, dedupe_key,
+                urgency, disposition, reason, body, deliver_after, expires_at, created_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT DO NOTHING RETURNING id""",
+            (recommendation_id, user_id, sid, period, row["dedupe_key"], row["urgency"],
+            row["disposition"], row["reason"], row["body"], row["deliver_after"], row["expires_at"], now),
+        ).fetchone()
+        if result and row["urgency"] == "urgent":
+            self._conn.execute(
+                """UPDATE notification_outbox SET status='failed', last_error='superseded_by_urgent'
+                   WHERE user_id=%s AND league_season_id=%s AND dedupe_key=%s
+                   AND urgency='notify' AND status='pending'""",
+                (user_id, sid, row["dedupe_key"]),
+            )
+        return str(result[0]) if result else None
+
+    def due_notifications(self, now):
+        """Read eligible delivery intents; claiming/sending belongs to the sender."""
+        rows = self._conn.execute(
+            """SELECT id, recommendation_id, user_id, body, reply_code, expires_at
+               FROM notification_outbox WHERE status='pending' AND deliver_after<=%s
+               AND expires_at>%s ORDER BY deliver_after, id""", (now, now),
+        ).fetchall()
+        return [dict(zip(("id", "recommendation_id", "user_id", "body", "reply_code", "expires_at"), r, strict=True))
+                for r in rows]
+
+    def lock_notification_scope(self, user_id, league_id):
+        self._conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                           (f"{user_id}:{league_id}",))
+
     def save_recommendation(
         self,
         user_id: str,
