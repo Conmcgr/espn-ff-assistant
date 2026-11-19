@@ -322,10 +322,10 @@ def waiver_summary(o: WaiverOption, names: dict[int, str]) -> str:
     return f"{text}. {o.delta_next:+.1f} next week, {o.delta_ros:+.1f} rest of season."
 
 
-def run_waivers(ctx: _Context) -> EngineResult:
+def run_waivers(ctx: _Context, *, allow_empty_pool: bool = False) -> EngineResult:
     roster, roster_names = team_players(ctx, ctx.team_id)
     pool, pool_names = pool_players(ctx)
-    if not pool:
+    if not pool and not allow_empty_pool:
         raise EngineError(f"No free-agent pool snapshot for {ctx.season} week {ctx.period}; run sync first.")
     names = {**roster_names, **pool_names}
     wctx = waiver_context(ctx, roster)

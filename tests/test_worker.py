@@ -1,0 +1,186 @@
+from __future__ import annotations
+
+import json
+import os
+import runpy
+import sys
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+from espn_ff_assistant.config import Settings
+from espn_ff_assistant.database import apply_migrations, connection
+from espn_ff_assistant.espn_client import ESPNClient, FetchResult
+from espn_ff_assistant.loader import load_run
+from espn_ff_assistant.repository import Repository
+from espn_ff_assistant.sync import sync_current
+from espn_ff_assistant.worker import WorkerScope, _check_views
+
+ROOT = Path(__file__).resolve().parents[1]
+SCOPE = WorkerScope(79301, "e5f5e3ae-dfa4-4b8a-a18f-a72d249d4585", 4, 2026, 4)
+
+
+def _player(pid, points):
+    return {
+        "id": pid, "fullName": f"Synthetic Player {pid}", "defaultPositionId": 1,
+        "proTeamId": 1, "eligibleSlots": [0, 20], "injuryStatus": "ACTIVE",
+        "stats": [
+            {"seasonId": SCOPE.season, "scoringPeriodId": SCOPE.scoring_period,
+             "statSourceId": 1, "statSplitTypeId": 1, "appliedTotal": points},
+            {"seasonId": SCOPE.season, "scoringPeriodId": 0,
+             "statSourceId": 1, "statSplitTypeId": 2, "appliedTotal": points * 10},
+        ],
+    }
+
+
+@pytest.fixture
+def payloads():
+    def entry(pid, points, slot):
+        return {"playerId": pid, "lineupSlotId": slot, "playerPoolEntry": {
+            "player": _player(pid, points), "lineupLocked": False,
+        }}
+
+    return {
+        "mStatus": {"status": {"firstScoringPeriod": 1, "latestScoringPeriod": 4, "finalScoringPeriod": 17}},
+        "mSettings": {"id": SCOPE.league_id, "settings": {
+            "rosterSettings": {"lineupSlotCounts": {"0": 1, "20": 1}},
+            "acquisitionSettings": {"isUsingAcquisitionBudget": True, "acquisitionBudget": 100},
+        }},
+        "mTeam": {"teams": [{"id": 4, "name": "Test Home"}, {"id": 7, "name": "Test Away"}]},
+        "mRoster": {"scoringPeriodId": 4, "teams": [
+            {"id": 4, "roster": {"entries": [entry(111, 8, 0), entry(112, 26, 20)]}},
+            {"id": 7, "roster": {"entries": [entry(113, 10, 0)]}},
+        ]},
+        "mTransactions2": {"transactions": []},
+        "kona_player_info": {"players": [{"player": _player(114, 45), "status": "WAIVERS"}]},
+        "proTeamSchedules_wl": {"settings": {"proTeams": [{"id": 1, "proGamesByScoringPeriod": {
+            "4": [{"id": 101, "homeProTeamId": 1, "awayProTeamId": 2, "date": 1791133200000}],
+        }}]}},
+    }
+
+
+def _fetch(view, payload, now, period=None):
+    return FetchResult(SCOPE.season, view, period, "https://example.test", now.isoformat(), 200, payload, "present")
+
+
+@pytest.mark.parametrize(("view", "variant", "expected"), [
+    ("mSettings", "wrong_league", "wrong_scope"),
+    ("mStatus", "wrong_week", "wrong_period"),
+    ("mTeam", "wrong_team", "wrong_team"),
+    ("mRoster", "missing_team", "partial"),
+    ("mRoster", "old", "stale"),
+    ("mTransactions2", "unchanged", "valid_empty"),
+    ("mTransactions2", "omit", "missing"),
+    ("mTransactions2", "empty_object", "partial"),
+    ("kona_player_info", "empty_pool", "valid_empty"),
+    ("kona_player_info", "empty_object", "partial"),
+    ("kona_player_info", "http_failure", "failed"),
+    ("kona_player_info", "rostered_in_pool", "partial"),
+    ("proTeamSchedules_wl", "empty_object", "partial"),
+    ("proTeamSchedules_wl", "missing_pro_team", "partial"),
+])
+def test_required_view_states(payloads, view, variant, expected):
+    now = datetime.now(UTC)
+    period_inputs = {"mRoster", "mTransactions2", "kona_player_info"}
+    replacements = {
+        "wrong_league": {"id": 222},
+        "wrong_week": {"status": {"firstScoringPeriod": 1, "latestScoringPeriod": 5, "finalScoringPeriod": 17}},
+        "wrong_team": {"teams": [{"id": 7}]},
+        "missing_team": {"teams": payloads["mRoster"]["teams"][:1]},
+        "empty_pool": {"players": []},
+        "rostered_in_pool": {"players": [{"player": _player(111, 45), "status": "WAIVERS"}]},
+        "missing_pro_team": {"settings": {"proTeams": [{"id": 3, "byeWeek": SCOPE.scoring_period}]}},
+        "empty_object": {},
+    }
+    fetches = []
+    for name, payload in payloads.items():
+        if name == view and variant == "omit":
+            continue
+        period = SCOPE.scoring_period if name in period_inputs else None
+        fetch = _fetch(name, payload, now, period)
+        if name == view:
+            if variant in replacements:
+                fetch = replace(fetch, payload=replacements[variant])
+            elif variant == "old":
+                fetch = replace(fetch, retrieved_at=(now - timedelta(minutes=16)).isoformat())
+            elif variant == "http_failure":
+                fetch = replace(fetch, status_code=401, payload=None, state="error")
+        fetches.append(fetch)
+    states, _ = _check_views(tuple(fetches), SCOPE, now)
+    assert states[view] == expected
+
+
+@pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="set TEST_DATABASE_URL for the worker smoke test")
+def test_worker_cli_shadow_round_trip(tmp_path, monkeypatch, capsys, payloads):
+    """Run the CLI, archive, loader, repository, and engines; only ESPN is simulated."""
+    monkeypatch.setenv("DATABASE_URL", os.environ["TEST_DATABASE_URL"])
+    monkeypatch.setenv("ESPN_LEAGUE_ID", str(SCOPE.league_id))
+    monkeypatch.setenv("ESPN_S2", "synthetic-only")
+    monkeypatch.setenv("ESPN_SWID", "synthetic-only")
+    monkeypatch.chdir(tmp_path)
+    apply_migrations(ROOT / "migrations")
+    stale_view = None
+
+    def fetch(self, season, view, *, scoring_period=None, **kwargs):
+        assert season == SCOPE.season and self.settings.league_id == SCOPE.league_id
+        now = datetime.now(UTC)
+        if stale_view == view:
+            now -= timedelta(minutes=16)
+        return _fetch(view, payloads.get(view, {}), now, scoring_period)
+
+    monkeypatch.setattr(ESPNClient, "fetch", fetch)
+    initial = sync_current(Settings.from_env(), Path("data/raw"), season=SCOPE.season,
+                           scoring_period=SCOPE.scoring_period, load=False)
+    load_run(initial.run_dir)
+    with connection() as conn:
+        repo = Repository(conn)
+        user = repo.default_user_id()
+        league = repo.league_id(SCOPE.league_id, user_id=user)
+        repo.set_user_team(user, league, SCOPE.season, SCOPE.team_id)
+
+    def invoke(label, *, league_id=SCOPE.league_id, team_id=SCOPE.team_id, user_id=user):
+        argv = ["worker.py", "--league", str(league_id), "--user", user_id, "--team", str(team_id),
+                "--season", str(SCOPE.season), "--week", str(SCOPE.scoring_period)]
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit) as exc:
+            runpy.run_path(str(ROOT / "scripts" / "worker.py"), run_name="__main__")
+        output = json.loads(capsys.readouterr().out)
+        with capsys.disabled():
+            print(f"{label}: exit={exc.value.code}, status={output['status']}, "
+                  f"alert_eligible={output['alert_eligible']}, decisions={output['decisions']}, "
+                  f"roster={output['views'].get('mRoster')}, pool={output['views'].get('kona_player_info')}")
+        return exc.value.code, output
+
+    code, actionable = invoke("fresh")
+    assert code == 0 and actionable["status"] == "ACTIONABLE" and actionable["alert_eligible"]
+    assert actionable["decisions"]["lineup"] == {"notify": 1}
+    assert actionable["decisions"]["waiver"] == {"notify": 1}
+
+    stale_view = "mRoster"
+    code, stale = invoke("stale roster")
+    assert code == 1 and stale["status"] == "SYNC_FAILED" and not stale["alert_eligible"]
+    assert stale["views"]["mRoster"] == "stale" and not stale["decisions"]
+    with connection() as conn:
+        assert Repository(conn).completed_sync_id(league, stale["run_id"]) is None
+    stale_view = None
+
+    for label, overrides in [
+        ("wrong league", {"league_id": 999}),
+        ("wrong team", {"team_id": 7}),
+        ("wrong user", {"user_id": SCOPE.user_id}),
+    ]:
+        code, rejected = invoke(label, **overrides)
+        assert code == 2 and rejected["status"] == "SCOPE_REJECTED"
+        assert not rejected["alert_eligible"] and rejected["run_id"] is None
+
+    # Keep the previously loaded attractive waiver candidate in PostgreSQL.
+    # The new explicitly empty snapshot must not fall back to it.
+    payloads["kona_player_info"]["players"] = []
+    roster = payloads["mRoster"]["teams"][0]["roster"]["entries"]
+    roster[0]["lineupSlotId"], roster[1]["lineupSlotId"] = 20, 0
+    code, quiet = invoke("empty pool after populated run")
+    assert code == 0 and quiet["status"] == "NO_ACTION" and not quiet["alert_eligible"]
+    assert quiet["views"]["kona_player_info"] == quiet["views"]["mTransactions2"] == "valid_empty"
+    assert quiet["decisions"] == {"lineup": {"no_action": 1}, "waiver": {"no_action": 1}}
