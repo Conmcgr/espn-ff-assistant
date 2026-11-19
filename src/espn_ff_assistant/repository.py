@@ -20,8 +20,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from .opportunities import Opportunity, candidates, diff
-
 # Run keys of live current-week syncs end with this suffix (see sync.py); only
 # those snapshots carry point-in-time injury status and ownership.
 LIVE_RUN_SUFFIX = "-current"
@@ -211,6 +209,31 @@ class DraftPick:
     provider_player_id: int | None
 
 
+@dataclass(frozen=True)
+class Opportunity:
+    kind: str
+    change_key: str
+    provider_player_id: int
+    provider_team_id: int | None
+    source_view: str
+    expires_at: datetime
+    attrs: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class StoredOpportunity:
+    opportunity: Opportunity
+    expired_at: datetime | None
+
+
+@dataclass(frozen=True)
+class ExecutedDrop:
+    provider_transaction_id: str
+    provider_player_id: int
+    provider_team_id: int | None
+    process_date: datetime | None
+
+
 # ---------------------------------------------------------------------------
 # Repository
 # ---------------------------------------------------------------------------
@@ -222,65 +245,83 @@ class Repository:
     transaction boundary; call conn.commit() after any writes.
     """
 
-    def record_opportunities(self, league_id, season, period, sync_id, observed_at):
-        sid = self._season_id(league_id, season)
-        self._conn.execute('SELECT id FROM league_seasons WHERE id=%s FOR UPDATE', (sid,))
-        latest = self._conn.execute(
-            'SELECT max(observed_at) FROM opportunity_scans WHERE league_season_id=%s', (sid,),
+    def __init__(self, conn: Any, *, player_sync_id: str | None = None) -> None:
+        self._conn = conn
+        self._player_sync_id = player_sync_id
+
+    def lock_opportunity_season(self, league_id: str, season: int) -> None:
+        self._conn.execute("SELECT id FROM league_seasons WHERE id=%s FOR UPDATE",
+                           (self._season_id(league_id, season),))
+
+    def latest_opportunity_observation(self, league_id: str, season: int) -> datetime | None:
+        return self._conn.execute(
+            "SELECT max(observed_at) FROM opportunity_scans WHERE league_season_id=%s",
+            (self._season_id(league_id, season),),
         ).fetchone()[0]
-        seen = self._conn.execute(
-            'SELECT 1 FROM opportunity_scans WHERE league_season_id=%s AND sync_run_id=%s',
-            (sid, sync_id),
-        ).fetchone()
-        counts = dict.fromkeys(('new', 'changed', 'unchanged', 'expired'), 0)
-        if seen or (latest is not None and observed_at <= latest):
-            return {'counts': counts, 'skipped_replay': True, 'events': []}
-        drops = self._conn.execute(
+
+    def opportunity_scan_processed(self, league_id: str, season: int, sync_id: str) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM opportunity_scans WHERE league_season_id=%s AND sync_run_id=%s",
+            (self._season_id(league_id, season), sync_id),
+        ).fetchone() is not None
+
+    def executed_drops(self, league_id: str, season: int, period: int) -> list[ExecutedDrop]:
+        rows = self._conn.execute(
             """SELECT DISTINCT t.provider_transaction_id, i.provider_player_id,
                       i.from_provider_team_id, t.process_date
                FROM transactions t JOIN transaction_items i ON i.transaction_id=t.id
                WHERE t.league_season_id=%s AND t.scoring_period<=%s
                  AND t.status='EXECUTED' AND i.item_type='DROP'""",
-            (sid, period),
+            (self._season_id(league_id, season), period),
         ).fetchall()
-        current = candidates(self.player_status(league_id, season, period),
-                             self.roster_at(league_id, season, period), drops,
-                             self.pro_games(season, period), period, observed_at)
+        return [ExecutedDrop(*row) for row in rows]
+
+    def stored_opportunities(self, league_id: str, season: int) -> list[StoredOpportunity]:
         rows = self._conn.execute(
             """SELECT kind, change_key, provider_player_id, provider_team_id, source_view,
                       expires_at, attrs, expired_at FROM opportunities WHERE league_season_id=%s""",
-            (sid,),
+            (self._season_id(league_id, season),),
         ).fetchall()
-        previous = {r[1]: (Opportunity(*r[:7]), r[7]) for r in rows}
-        events = []
-        for opportunity, change in diff(previous, current, observed_at):
-            o = opportunity
-            row = self._conn.execute(
-                """INSERT INTO opportunities (league_season_id, kind, change_key,
-                       provider_player_id, provider_team_id, source_view, sync_run_id,
-                       first_observed_at, last_observed_at, expires_at, attrs, expired_at)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                   ON CONFLICT (league_season_id, change_key) DO UPDATE SET
-                       last_observed_at=EXCLUDED.last_observed_at,
-                       expires_at=EXCLUDED.expires_at, attrs=EXCLUDED.attrs,
-                       expired_at=EXCLUDED.expired_at RETURNING id""",
-                (sid, o.kind, o.change_key, o.provider_player_id, o.provider_team_id,
-                 o.source_view, sync_id, observed_at, observed_at, o.expires_at,
-                 json.dumps(o.attrs), observed_at if change == 'expired' else None),
-            ).fetchone()
-            self._conn.execute(
-                """INSERT INTO opportunity_events VALUES (%s,%s,%s,%s)
-                   ON CONFLICT DO NOTHING""", (row[0], sync_id, observed_at, change),
-            )
-            counts[change] += 1
-            events.append({'kind': o.kind, 'change_key': o.change_key, 'change': change})
-        self._conn.execute('INSERT INTO opportunity_scans VALUES (%s,%s,%s)',
-                           (sid, sync_id, observed_at))
-        return {'counts': counts, 'skipped_replay': False, 'events': events}
+        return [StoredOpportunity(Opportunity(*row[:7]), row[7]) for row in rows]
 
-    def __init__(self, conn: Any, *, player_sync_id: str | None = None) -> None:
-        self._conn = conn
-        self._player_sync_id = player_sync_id
+    def upsert_opportunity(
+        self, league_id: str, season: int, opportunity: Opportunity, sync_id: str,
+        observed_at: datetime, expired_at: datetime | None,
+    ) -> str:
+        o = opportunity
+        row = self._conn.execute(
+            """INSERT INTO opportunities (league_season_id, kind, change_key,
+                   provider_player_id, provider_team_id, source_view, sync_run_id,
+                   first_observed_at, last_observed_at, expires_at, attrs, expired_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (league_season_id, change_key) DO UPDATE SET
+                   last_observed_at=EXCLUDED.last_observed_at,
+                   expires_at=EXCLUDED.expires_at, attrs=EXCLUDED.attrs,
+                   expired_at=EXCLUDED.expired_at RETURNING id""",
+            (self._season_id(league_id, season), o.kind, o.change_key,
+             o.provider_player_id, o.provider_team_id,
+             o.source_view, sync_id, observed_at, observed_at, o.expires_at,
+             json.dumps(o.attrs), expired_at),
+        ).fetchone()
+        return str(row[0])
+
+    def insert_opportunity_event(
+        self, opportunity_id: str, sync_id: str, observed_at: datetime, change: str,
+    ) -> None:
+        self._conn.execute(
+            """INSERT INTO opportunity_events (opportunity_id, sync_run_id, observed_at, change)
+               VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+            (opportunity_id, sync_id, observed_at, change),
+        )
+
+    def insert_opportunity_scan(
+        self, league_id: str, season: int, sync_id: str, observed_at: datetime,
+    ) -> None:
+        self._conn.execute(
+            """INSERT INTO opportunity_scans (league_season_id, sync_run_id, observed_at)
+               VALUES (%s,%s,%s)""",
+            (self._season_id(league_id, season), sync_id, observed_at),
+        )
 
     # ---- League helpers ----------------------------------------------------
 

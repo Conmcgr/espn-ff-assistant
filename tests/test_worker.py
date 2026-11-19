@@ -15,6 +15,7 @@ from espn_ff_assistant.config import Settings
 from espn_ff_assistant.database import apply_migrations, connection
 from espn_ff_assistant.espn_client import ESPNClient, FetchResult
 from espn_ff_assistant.loader import load_run
+from espn_ff_assistant.opportunities import record_scan
 from espn_ff_assistant.repository import Repository
 from espn_ff_assistant.sync import sync_current
 from espn_ff_assistant.worker import WorkerScope, _check_views
@@ -264,6 +265,29 @@ def test_opportunity_demo(tmp_path, monkeypatch, capsys, payloads):
             print(f"{label}: status={output['status']} replay={replay} events={ledger['events']}")
         return output
 
+    class ExpiringClock(datetime):
+        calls = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.calls += 1
+            return datetime.now(tz) + timedelta(minutes=16 if cls.calls > 1 else 0)
+
+    with monkeypatch.context() as patch:
+        patch.setattr("espn_ff_assistant.worker.datetime", ExpiringClock)
+        code, expired = _invoke_worker(
+            monkeypatch, capsys, user_id=user, league_id=SCOPE.league_id,
+        )
+    assert code == 1 and expired["status"] == "SYNC_FAILED"
+    assert expired["error"] == "required_views_expired" and not expired["opportunities"]
+    with connection() as conn:
+        repo = Repository(conn)
+        assert repo.latest_opportunity_observation(league, SCOPE.season) is None
+        assert repo.stored_opportunities(league, SCOPE.season) == []
+        assert not repo.opportunity_scan_processed(
+            league, SCOPE.season, repo.completed_sync_id(league, expired["run_id"]),
+        )
+
     first = scan('scan1', (2, 0, 0, 0))
     payloads['mTransactions2']['transactions'] = []
     now += timedelta(seconds=1)
@@ -274,7 +298,7 @@ def test_opportunity_demo(tmp_path, monkeypatch, capsys, payloads):
     with connection() as conn:
         repo = Repository(conn)
         sync_id = repo.completed_sync_id(league, first['run_id'])
-        repeated = repo.record_opportunities(league, SCOPE.season, SCOPE.scoring_period,
+        repeated = record_scan(repo, league, SCOPE.season, SCOPE.scoring_period,
                                              sync_id, now + timedelta(seconds=2))
         assert repeated['skipped_replay'] and not repeated['events']
     now += timedelta(seconds=2)

@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from espn_ff_assistant.opportunities import Opportunity, candidates, diff
+from espn_ff_assistant.repository import ExecutedDrop
 
 NOW = datetime(2026, 10, 1, tzinfo=UTC)
 ITEM = Opportunity('starter_out', 'key', 1, 2, 'mRoster', NOW + timedelta(hours=1), {'slot': 0})
@@ -30,7 +31,7 @@ def test_candidate_qualification_and_missing_data():
                              pro_team_id=3, injury_status='OUT')
     entry = SimpleNamespace(provider_player_id=1, provider_team_id=2, lineup_slot_id=0)
     game = SimpleNamespace(kickoff_at=NOW + timedelta(hours=1), is_bye=False)
-    drops = [('tx', 1, 2, NOW - timedelta(hours=1))]
+    drops = [ExecutedDrop("tx", 1, 2, NOW - timedelta(hours=1))]
     current = candidates({1: status}, [entry], drops, {3: game}, 4, NOW)
     assert set(current) == {'player_dropped:tx:1', 'starter_out:2:1:4'}
     status.injury_status = 'INJURY_RESERVE'
@@ -39,8 +40,8 @@ def test_candidate_qualification_and_missing_data():
         'unchanged', 'changed',
     ]
     assert candidates({}, [entry], drops, {}, 4, NOW) == {}
-    assert candidates({1: status}, [entry], [('tx', 1, 2, None)], {}, 4, NOW) == {}
-    assert candidates({1: status}, [entry], [('tx', 1, 2, NOW + timedelta(days=1))], {}, 4, NOW) == {}
+    assert candidates({1: status}, [entry], [ExecutedDrop("tx", 1, 2, None)], {}, 4, NOW) == {}
+    assert candidates({1: status}, [entry], [ExecutedDrop("tx", 1, 2, NOW + timedelta(days=1))], {}, 4, NOW) == {}
     entry.lineup_slot_id = 20
     assert candidates({1: status}, [entry], [], {3: game}, 4, NOW) == {}
     entry.lineup_slot_id = 0
