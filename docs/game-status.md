@@ -1,55 +1,63 @@
-# F3: NFL game-status adapter
+# F3: NFL game-status observations
 
-`espn_ff_assistant.game_status.normalize_game_status` consumes the existing
-`proTeamSchedules_wl` fantasy season response. `sync_current` already fetches it
-with `game_level=True`; `RawArchive` saves its payload and manifest retrieval
-timestamp. No second feed or network call is introduced.
+## Validated ESPN sources
 
-## Source contract and limits
+Live public responses checked on 2026-11-19:
 
-The outer shape is established by `normalize/players.py:pro_schedule` and the
-resolved schedule finding in `docs/recommendation-engine-handoff.md` §649:
-`settings.proTeams[].proGamesByScoringPeriod[period][]`, game `id`, and `date`
-(epoch milliseconds). The same game appears under both participating teams.
-Team ID 0 is ignored. Byes create no game-status records.
+- Fantasy season endpoint, `?view=proTeamSchedules_wl`:
+  `settings.proTeams[].proGamesByScoringPeriod[period][]` has `id`, millisecond
+  `date`, `statsOfficial`, `validForLocking`, `startTimeTBD`, team IDs and
+  scoring period, **no status field**. This confirms the schedule structure used
+  by `normalize/players.py:pro_schedule`, but disproves the original status-token
+  assumption. Only literal `statsOfficial=true` is final evidence in
+  `normalize_fantasy_schedule`; otherwise state is unknown.
+- Public `https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard`,
+  parameters `dates=2026&seasontype=2&week=N`: `events[].id`, ISO `date`, and
+  `status.type.{name,state,completed}`. Weeks 1, 8 and 10 returned respectively
+  16, 14 and 14 `STATUS_FINAL/post/true` events. Current week 11 returned 13
+  `STATUS_SCHEDULED/pre/false` events. IDs share the fantasy game-ID namespace.
 
-**Unverified assumption:** each game exposes a scalar `status` containing ESPN
-`STATUS_SCHEDULED`, `STATUS_IN_PROGRESS`, `STATUS_DELAYED`, `STATUS_POSTPONED`,
-`STATUS_SUSPENDED`, or `STATUS_FINAL` names. The existing checked-in code proves
-the schedule structure, **not this status field or its vocabulary**. All test
-data is synthetic. No credentialed/live response was available for validation.
-Numeric, object-shaped, absent, and unrecognized statuses remain `unknown`;
-in particular, scoreboard-shaped `status.type` objects are not silently assumed
-to be the fantasy schema. Validate this field against a private archived/live
-response before using finality in production. This PR does not establish that
-the live fantasy shape exposes usable status, nor justify adding another feed.
+The fantasy feed cannot express interruptions, so the plan's failed-source
+validation exception now justifies the second ESPN endpoint. `fetch_scoreboard`
+uses a separate session with environment authentication disabled; it never uses
+fantasy settings, cookies, or authorization. It returns FetchResult metadata,
+including season type (week is `scoring_period`). Existing fantasy sync remains
+unchanged; scoreboard ingestion is opt-in via the script.
 
-## Usage and temporal semantics
+## Contract
 
-Pass the retrieval timestamp, not kickoff or the current clock, as an aware
-`datetime`. For archived data use manifest `retrieved_at`; for fresh fetches use
-`datetime.fromisoformat(result.retrieved_at)` and pass `fetch_state=result.state`.
-The batch distinguishes missing, empty, malformed, partial, present, and failed
-input. Unknown status is a valid game observation, not a missing game. Invalid
-entries are reported in `issues`; conflicting duplicate IDs are fail-closed to
-unknown. Each returned dictionary is keyed by provider game ID (string).
+`normalize_game_status` is the primary scoreboard adapter. Final requires an
+explicit allowlisted final name **and** `state=post` **and** literal
+`completed=true`. Scheduled requires pre/false; in-progress, halftime,
+end-period and overtime require in/false. Delayed/rain-delay, postponed and
+suspended require pre or in, with completed=false. Canceled, missing, unmapped
+and inconsistent status is unknown. Interruption/OT names are covered by
+synthetic tests, not observed in the live samples above.
 
-`batch.games[id].final_observed_at` is the retrieval timestamp only when that
-observation explicitly says final; otherwise it is `None`. It is not an actual
-game-end timestamp. Kickoff is never completion evidence. Preserve individual
-batches to retain history; the adapter does not merge observations or claim an
-earliest final time. R1 must select observations as of its review time and track
-the first final observation/settling delay, including subsequent corrections.
+Both pure adapters return batches distinguished as missing, empty, malformed,
+partial, present or failed. Records are keyed by string provider game ID and
+include source, raw status evidence, UTC observed_at and kickoff_at. Conflicting
+duplicates fail closed to unknown. Fantasy team 0 and byes produce no game.
 
-No schema change: `pro_team_games` currently stores schedule/bye information,
-not observation history. The pure boundary and existing raw archives suffice
-for F3; durable completion-review state belongs with R1 rather than overwriting
-schedule rows or inventing finality history here.
+Pass the actual aware retrieval timestamp: FetchResult.retrieved_at or an archive
+manifest timestamp, never now() for old data. `final_observed_at` is evidence
+time for that observation, not actual end-of-play or earliest-ever finality.
+Keep batches separately; R1 owns as-of selection, corrections, first-final
+tracking and settling delay. Kickoff is never finality evidence.
 
-## Offline demo
+No migration: schedule rows are not observation history. Existing raw archival
+conventions plus the pure adapter suffice here; R1 can add durable review state.
+No live delayed/postponed/suspended or final-OT response was verified.
 
-From the repository root:
+## Demo
 
 ```sh
-uv run --offline python -c 'import json; from datetime import datetime; from espn_ff_assistant.game_status import normalize_game_status; b = normalize_game_status(json.load(open("tests/fixtures/game_status.json")), observed_at=datetime.fromisoformat("2026-09-28T02:00:00+00:00")); print(b.state); [print(g.provider_game_id, g.state.value, g.final_observed_at) for g in b.games.values()]'
+uv run --offline python scripts/game_status.py --season 2026 --week 10
+uv run --offline python scripts/game_status.py --season 2026 --week 11
+uv run --offline python scripts/game_status.py --file tests/fixtures/scoreboard.json --observed-at 2026-09-28T02:00:00+00:00
+uv run --offline python scripts/game_status.py --fantasy --file tests/fixtures/fantasy_schedule.json --observed-at 2026-09-28T02:00:00+00:00 --summary
 ```
+
+Saved files require an explicit retrieval timestamp to avoid inventing evidence.
+Fixtures are synthetic and contain no private league data. The script does not
+persist raw responses or write to ESPN.

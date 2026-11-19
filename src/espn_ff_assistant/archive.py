@@ -63,6 +63,8 @@ class RawArchive:
             str(path.relative_to(self.run_dir)) if result.payload is not None else None
         )
         entry.pop("payload", None)
+        if result.season_type is not None:
+            entry["season_type"] = result.season_type
         with self.manifest.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(entry, sort_keys=True) + "\n")
         return path if result.payload is not None else None

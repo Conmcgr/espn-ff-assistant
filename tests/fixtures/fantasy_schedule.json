@@ -1,0 +1,33 @@
+{
+  "settings": {
+    "proTeams": [
+      {
+        "id": 1,
+        "proGamesByScoringPeriod": {
+          "3": [
+            {
+              "id": "demo-1",
+              "date": 1790528400000,
+              "awayProTeamId": 1,
+              "homeProTeamId": 2,
+              "scoringPeriodId": 3,
+              "startTimeTBD": false,
+              "statsOfficial": true,
+              "validForLocking": true
+            },
+            {
+              "id": "demo-2",
+              "date": 1790528400000,
+              "awayProTeamId": 1,
+              "homeProTeamId": 3,
+              "scoringPeriodId": 3,
+              "startTimeTBD": false,
+              "statsOfficial": false,
+              "validForLocking": true
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

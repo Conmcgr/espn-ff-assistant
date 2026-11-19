@@ -24,6 +24,48 @@ class FetchResult:
     state: str
     error: str | None = None
     archive_key: str | None = None
+    season_type: int | None = None
+
+
+def fetch_scoreboard(
+    season: int, week: int, *, season_type: int = 2, timeout: float = 30.0
+) -> FetchResult:
+    """Fetch public NFL status with an isolated, credential-free transport."""
+    url = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
+    retrieved_at = datetime.now(UTC).isoformat()
+    status_code = None
+    payload = None
+    state, error = "error", None
+    with requests.Session() as session:
+        # Do not inherit netrc authentication or authenticated fantasy cookies.
+        session.trust_env = False
+        try:
+            response = session.get(
+                url, params={"dates": season, "week": week, "seasontype": season_type},
+                timeout=timeout,
+            )
+            status_code = response.status_code
+            if status_code != 200:
+                state = "unavailable" if status_code in (404, 410) else "error"
+                error = f"HTTP {status_code}"
+            elif "json" not in response.headers.get("content-type", ""):
+                error = "non-JSON response"
+            else:
+                try:
+                    data = response.json()
+                except ValueError:
+                    error = "invalid JSON"
+                else:
+                    if isinstance(data, dict):
+                        payload, state = data, "present"
+                    else:
+                        error = "unexpected JSON shape"
+        except requests.RequestException as exc:
+            error = type(exc).__name__
+    return FetchResult(
+        season, "scoreboard", week, url, retrieved_at, status_code, payload, state,
+        error, f"scoreboard-type-{season_type}", season_type,
+    )
 
 
 class ESPNClient:
