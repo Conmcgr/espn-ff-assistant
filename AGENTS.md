@@ -44,7 +44,8 @@ The ESPN data-feasibility spike is complete. Do not re-litigate it.
 - Never log credential values. Error messages may name a missing variable but
   must not print its contents.
 - Raw ESPN responses are private (they contain member identifiers). Store only
-  under `data/raw/`, which is Git-ignored.
+  under `data/raw/`, which is Git-ignored, or in the operator-configured
+  private archive store (`RAW_ARCHIVE_URL`). Never use a public bucket.
 - Generated/private analyses go under `data/derived/` or files ending in
   `.local.md`.
 - Checked-in fixtures must be synthetic or thoroughly anonymized.
