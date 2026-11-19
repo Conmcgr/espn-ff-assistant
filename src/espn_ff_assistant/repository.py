@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from .opportunities import Opportunity, candidates, diff
+
 # Run keys of live current-week syncs end with this suffix (see sync.py); only
 # those snapshots carry point-in-time injury status and ownership.
 LIVE_RUN_SUFFIX = "-current"
@@ -219,6 +221,62 @@ class Repository:
     Construct with an open psycopg connection. The caller owns the
     transaction boundary; call conn.commit() after any writes.
     """
+
+    def record_opportunities(self, league_id, season, period, sync_id, observed_at):
+        sid = self._season_id(league_id, season)
+        self._conn.execute('SELECT id FROM league_seasons WHERE id=%s FOR UPDATE', (sid,))
+        latest = self._conn.execute(
+            'SELECT max(observed_at) FROM opportunity_scans WHERE league_season_id=%s', (sid,),
+        ).fetchone()[0]
+        seen = self._conn.execute(
+            'SELECT 1 FROM opportunity_scans WHERE league_season_id=%s AND sync_run_id=%s',
+            (sid, sync_id),
+        ).fetchone()
+        counts = dict.fromkeys(('new', 'changed', 'unchanged', 'expired'), 0)
+        if seen or (latest is not None and observed_at <= latest):
+            return {'counts': counts, 'skipped_replay': True, 'events': []}
+        drops = self._conn.execute(
+            """SELECT DISTINCT t.provider_transaction_id, i.provider_player_id,
+                      i.from_provider_team_id, t.process_date
+               FROM transactions t JOIN transaction_items i ON i.transaction_id=t.id
+               WHERE t.league_season_id=%s AND t.scoring_period<=%s
+                 AND t.status='EXECUTED' AND i.item_type='DROP'""",
+            (sid, period),
+        ).fetchall()
+        current = candidates(self.player_status(league_id, season, period),
+                             self.roster_at(league_id, season, period), drops,
+                             self.pro_games(season, period), period, observed_at)
+        rows = self._conn.execute(
+            """SELECT kind, change_key, provider_player_id, provider_team_id, source_view,
+                      expires_at, attrs, expired_at FROM opportunities WHERE league_season_id=%s""",
+            (sid,),
+        ).fetchall()
+        previous = {r[1]: (Opportunity(*r[:7]), r[7]) for r in rows}
+        events = []
+        for opportunity, change in diff(previous, current, observed_at):
+            o = opportunity
+            row = self._conn.execute(
+                """INSERT INTO opportunities (league_season_id, kind, change_key,
+                       provider_player_id, provider_team_id, source_view, sync_run_id,
+                       first_observed_at, last_observed_at, expires_at, attrs, expired_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT (league_season_id, change_key) DO UPDATE SET
+                       last_observed_at=EXCLUDED.last_observed_at,
+                       expires_at=EXCLUDED.expires_at, attrs=EXCLUDED.attrs,
+                       expired_at=EXCLUDED.expired_at RETURNING id""",
+                (sid, o.kind, o.change_key, o.provider_player_id, o.provider_team_id,
+                 o.source_view, sync_id, observed_at, observed_at, o.expires_at,
+                 json.dumps(o.attrs), observed_at if change == 'expired' else None),
+            ).fetchone()
+            self._conn.execute(
+                """INSERT INTO opportunity_events VALUES (%s,%s,%s,%s)
+                   ON CONFLICT DO NOTHING""", (row[0], sync_id, observed_at, change),
+            )
+            counts[change] += 1
+            events.append({'kind': o.kind, 'change_key': o.change_key, 'change': change})
+        self._conn.execute('INSERT INTO opportunity_scans VALUES (%s,%s,%s)',
+                           (sid, sync_id, observed_at))
+        return {'counts': counts, 'skipped_replay': False, 'events': events}
 
     def __init__(self, conn: Any, *, player_sync_id: str | None = None) -> None:
         self._conn = conn

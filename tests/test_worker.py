@@ -7,6 +7,7 @@ import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -213,3 +214,76 @@ def test_worker_cli_shadow_round_trip(tmp_path, monkeypatch, capsys, payloads):
     assert code == 0 and quiet["status"] == "NO_ACTION" and not quiet["alert_eligible"]
     assert quiet["views"]["kona_player_info"] == quiet["views"]["mTransactions2"] == "valid_empty"
     assert quiet["decisions"] == {"lineup": {"no_action": 1}, "waiver": {"no_action": 1}}
+
+
+@pytest.mark.skipif(not os.getenv('TEST_DATABASE_URL'), reason='set TEST_DATABASE_URL')
+def test_opportunity_demo(tmp_path, monkeypatch, capsys, payloads):
+    monkeypatch.setattr(sys.modules[__name__], 'SCOPE', replace(
+        SCOPE, league_id=80000 + uuid4().int % 1000000000,
+    ))
+    payloads['mSettings']['id'] = SCOPE.league_id
+    monkeypatch.setenv('DATABASE_URL', os.environ['TEST_DATABASE_URL'])
+    monkeypatch.setenv('ESPN_LEAGUE_ID', str(SCOPE.league_id))
+    monkeypatch.setenv('ESPN_S2', 'synthetic-only')
+    monkeypatch.setenv('ESPN_SWID', 'synthetic-only')
+    monkeypatch.chdir(tmp_path)
+    apply_migrations(ROOT / 'migrations')
+    now = datetime.now(UTC) - timedelta(minutes=5)
+    payloads['mTransactions2']['transactions'] = [{
+        'id': 'synthetic-drop-114', 'status': 'EXECUTED', 'type': 'ROSTER',
+        'processDate': int((now - timedelta(hours=1)).timestamp() * 1000),
+        'items': [{'type': 'DROP', 'playerId': 114, 'fromTeamId': 7}],
+    }]
+    starter = payloads['mRoster']['teams'][0]['roster']['entries'][0]
+    starter['playerPoolEntry']['player']['injuryStatus'] = 'OUT'
+    game = payloads['proTeamSchedules_wl']['settings']['proTeams'][0]['proGamesByScoringPeriod']['4'][0]
+    game['date'] = int((now + timedelta(hours=2)).timestamp() * 1000)
+
+    def fetch(self, season, view, *, scoring_period=None, **kwargs):
+        return _fetch(view, payloads.get(view, {}), now, scoring_period)
+
+    monkeypatch.setattr(ESPNClient, 'fetch', fetch)
+    initial = sync_current(Settings.from_env(), Path('data/raw'), season=SCOPE.season,
+                           scoring_period=SCOPE.scoring_period, load=False)
+    load_run(initial.run_dir)
+    with connection() as conn:
+        repo = Repository(conn)
+        user = repo.default_user_id()
+        league = repo.league_id(SCOPE.league_id, user_id=user)
+        repo.set_user_team(user, league, SCOPE.season, SCOPE.team_id)
+
+    def scan(label, expected, replay=False):
+        code, output = _invoke_worker(monkeypatch, capsys, user_id=user, league_id=SCOPE.league_id)
+        assert code == 0, output
+        ledger = output['opportunities']
+        assert ledger['counts'] == dict(zip(
+            ('new', 'changed', 'unchanged', 'expired'), expected, strict=True,
+        ))
+        assert ledger['skipped_replay'] is replay
+        with capsys.disabled():
+            print(f"{label}: status={output['status']} replay={replay} events={ledger['events']}")
+        return output
+
+    first = scan('scan1', (2, 0, 0, 0))
+    payloads['mTransactions2']['transactions'] = []
+    now += timedelta(seconds=1)
+    scan('scan2', (0, 0, 2, 0))
+    scan('same observation', (0, 0, 0, 0), True)
+    now -= timedelta(seconds=1)
+    scan('older observation', (0, 0, 0, 0), True)
+    with connection() as conn:
+        repo = Repository(conn)
+        sync_id = repo.completed_sync_id(league, first['run_id'])
+        repeated = repo.record_opportunities(league, SCOPE.season, SCOPE.scoring_period,
+                                             sync_id, now + timedelta(seconds=2))
+        assert repeated['skipped_replay'] and not repeated['events']
+    now += timedelta(seconds=2)
+    payloads['kona_player_info']['players'][0]['status'] = 'FREEAGENT'
+    scan('scan3', (0, 1, 1, 0))
+    now += timedelta(seconds=1)
+    pool = payloads['kona_player_info']['players'].pop()
+    payloads['mRoster']['teams'][1]['roster']['entries'].append({
+        'playerId': 114, 'lineupSlotId': 20, 'playerPoolEntry': pool,
+    })
+    starter['lineupSlotId'] = 20
+    scan('scan4', (0, 0, 0, 2))

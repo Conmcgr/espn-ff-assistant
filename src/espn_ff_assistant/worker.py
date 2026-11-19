@@ -49,6 +49,7 @@ class WorkerResult:
     observed_at: str | None = None
     views: dict[str, str] = field(default_factory=dict)
     decisions: dict[str, dict[str, int]] = field(default_factory=dict)
+    opportunities: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
 
 
@@ -251,6 +252,11 @@ def run_once(settings: Settings, scope: WorkerScope, raw_root: Path = Path("data
             results = (
                 engine.run_lineup(ctx),
                 engine.run_waivers(ctx, allow_empty_pool=result.views["kona_player_info"] == "valid_empty"),
+            )
+            if datetime.now(UTC) - observed > MAX_INPUT_AGE:
+                raise ValueError('required_views_expired')
+            result.opportunities = repo.record_opportunities(
+                league, scope.season, scope.scoring_period, sync_id, observed,
             )
         now = datetime.now(UTC)
         if now - observed > MAX_INPUT_AGE:
