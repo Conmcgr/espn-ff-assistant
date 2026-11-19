@@ -220,3 +220,13 @@ def test_top_partner_share_is_zero_when_all_history_is_with_current_co_owners():
     signals = _Signals(1, WINDOW)
     trade_signals(signals, scope, [scope], txns, {}, {})
     assert _by_name(signals)["trade_top_partner_share"].value == 0
+
+
+def test_proposals_without_a_known_proposer_are_not_counted_as_received():
+    moves = [(10, 1, 2), (20, 2, 1)]
+    txns = [_trade("p", "trade_proposal", moves, proposer=None), _trade("r", "trade_decline", moves, hours=1)]
+    signals = _Signals(1, WINDOW)
+    trade_signals(signals, _scope(1), [_scope(1), _scope(2)], {2026: txns}, {}, {})
+    rows = _by_name(signals)
+    assert rows["trade_received_accept_rate_linked"].sample_size == 0
+    assert rows["trade_received_unresolved"].value == 0

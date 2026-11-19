@@ -187,6 +187,8 @@ def _received_responses(
     """(accepted / linked responses to proposals this manager received, unresolved count)."""
     accepted = linked = unresolved = 0
     for proposal, response in pairs:
+        if proposal.provider_team_id is None:
+            continue  # without the proposer the recipient is unknown
         targets = _counterparties(proposal, proposal.provider_team_id)
         if not any(scope.owns(proposal.season, t) for t in targets):
             continue
