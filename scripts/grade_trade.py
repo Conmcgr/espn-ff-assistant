@@ -18,6 +18,7 @@ def load_fixture(data: dict) -> tuple[TradeOffer, TradeContext]:
             LineupPlayer(raw["id"], raw.get("name", f"Synthetic {raw['id']}"),
                          frozenset(raw["slots"]), raw.get("next"),
                          injury_status=raw.get("injury_status"),
+                         on_bye=raw.get("on_bye", False),
                          locked=raw.get("locked", False),
                          current_slot=raw.get("current_slot", BENCH_SLOT)),
             raw["position"], raw.get("ros"), raw.get("remaining_games", 10), availability)

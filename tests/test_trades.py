@@ -174,3 +174,10 @@ def test_greedy_fills_skip_zero_gain_and_respect_position_limits():
     result = grade_trade(offer, ctx)
     assert result.user.before_fills == []
     assert result.user.after_fills == [5]
+
+
+def test_fixture_loader_keeps_bye_weeks() -> None:
+    data = json.loads((FIXTURES / "trade_even_hurts.json").read_text())
+    data["context"]["user_roster"][0]["on_bye"] = True
+    offer, ctx = CLI.load_fixture(data)
+    assert ctx.user_roster[0].lineup.on_bye
