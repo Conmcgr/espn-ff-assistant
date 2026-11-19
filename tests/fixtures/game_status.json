@@ -1,0 +1,48 @@
+{
+  "settings": {
+    "proTeams": [
+      {
+        "id": 1,
+        "proGamesByScoringPeriod": {
+          "3": [
+            {
+              "id": "demo-1",
+              "date": 1790514000000,
+              "status": "STATUS_SCHEDULED"
+            },
+            {
+              "id": "demo-2",
+              "date": 1790514000000,
+              "status": "STATUS_IN_PROGRESS"
+            },
+            {
+              "id": "demo-3",
+              "date": 1790514000000,
+              "status": "STATUS_DELAYED"
+            },
+            {
+              "id": "demo-4",
+              "date": 1790514000000,
+              "status": "STATUS_POSTPONED"
+            },
+            {
+              "id": "demo-5",
+              "date": 1790514000000,
+              "status": "STATUS_SUSPENDED"
+            },
+            {
+              "id": "demo-6",
+              "date": 1790514000000,
+              "status": "STATUS_FINAL"
+            },
+            {
+              "id": "demo-7",
+              "date": 1790514000000,
+              "status": "STATUS_FUTURE"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
