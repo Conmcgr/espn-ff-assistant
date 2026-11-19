@@ -112,6 +112,27 @@ def test_required_view_states(payloads, view, variant, expected):
     assert states[view] == expected
 
 
+def _invoke_worker(monkeypatch, capsys, *, league_id=SCOPE.league_id, team_id=SCOPE.team_id, user_id=SCOPE.user_id):
+    argv = ["worker.py", "--league", str(league_id), "--user", user_id, "--team", str(team_id),
+            "--season", str(SCOPE.season), "--week", str(SCOPE.scoring_period)]
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit) as exc:
+        runpy.run_path(str(ROOT / "scripts" / "worker.py"), run_name="__main__")
+    return exc.value.code, json.loads(capsys.readouterr().out)
+
+
+def test_worker_reports_missing_database_configuration(monkeypatch, capsys):
+    monkeypatch.setattr("espn_ff_assistant.config.load_dotenv", lambda: None)
+    monkeypatch.setattr("espn_ff_assistant.database.load_dotenv", lambda: None)
+    monkeypatch.setenv("ESPN_LEAGUE_ID", str(SCOPE.league_id))
+    monkeypatch.setenv("ESPN_S2", "synthetic-only")
+    monkeypatch.setenv("ESPN_SWID", "synthetic-only")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    code, output = _invoke_worker(monkeypatch, capsys)
+    assert code == 2 and output["status"] == "CONFIGURATION_ERROR"
+    assert "DATABASE_URL" in output["error"]
+
+
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="set TEST_DATABASE_URL for the worker smoke test")
 def test_worker_cli_shadow_round_trip(tmp_path, monkeypatch, capsys, payloads):
     """Run the CLI, archive, loader, repository, and engines; only ESPN is simulated."""
@@ -122,6 +143,9 @@ def test_worker_cli_shadow_round_trip(tmp_path, monkeypatch, capsys, payloads):
     monkeypatch.chdir(tmp_path)
     apply_migrations(ROOT / "migrations")
     stale_view = None
+    transaction = {"id": "synthetic-waiver", "status": "EXECUTED", "type": "WAIVER", "teamId": 7,
+                   "items": [{"type": "ADD", "playerId": 113, "toTeamId": 7}]}
+    payloads["mTransactions2"]["transactions"] = [transaction]
 
     def fetch(self, season, view, *, scoring_period=None, **kwargs):
         assert season == SCOPE.season and self.settings.league_id == SCOPE.league_id
@@ -141,22 +165,27 @@ def test_worker_cli_shadow_round_trip(tmp_path, monkeypatch, capsys, payloads):
         repo.set_user_team(user, league, SCOPE.season, SCOPE.team_id)
 
     def invoke(label, *, league_id=SCOPE.league_id, team_id=SCOPE.team_id, user_id=user):
-        argv = ["worker.py", "--league", str(league_id), "--user", user_id, "--team", str(team_id),
-                "--season", str(SCOPE.season), "--week", str(SCOPE.scoring_period)]
-        monkeypatch.setattr(sys, "argv", argv)
-        with pytest.raises(SystemExit) as exc:
-            runpy.run_path(str(ROOT / "scripts" / "worker.py"), run_name="__main__")
-        output = json.loads(capsys.readouterr().out)
+        code, output = _invoke_worker(monkeypatch, capsys, league_id=league_id, team_id=team_id, user_id=user_id)
         with capsys.disabled():
-            print(f"{label}: exit={exc.value.code}, status={output['status']}, "
+            print(f"{label}: exit={code}, status={output['status']}, "
                   f"alert_eligible={output['alert_eligible']}, decisions={output['decisions']}, "
                   f"roster={output['views'].get('mRoster')}, pool={output['views'].get('kona_player_info')}")
-        return exc.value.code, output
+        return code, output
 
     code, actionable = invoke("fresh")
     assert code == 0 and actionable["status"] == "ACTIONABLE" and actionable["alert_eligible"]
     assert actionable["decisions"]["lineup"] == {"notify": 1}
     assert actionable["decisions"]["waiver"] == {"notify": 1}
+
+    transaction.pop("items")
+    code, partial = invoke("partial transaction")
+    assert code == 1 and partial["status"] == "SYNC_FAILED" and not partial["alert_eligible"]
+    assert partial["views"]["mTransactions2"] == "partial"
+    with connection() as conn:
+        txns = Repository(conn).transactions(league, SCOPE.season, include_items=True)
+        stored = next(tx for tx in txns if tx.provider_transaction_id == transaction["id"])
+        assert [item["provider_player_id"] for item in stored.items] == [113]
+    payloads["mTransactions2"]["transactions"] = []
 
     stale_view = "mRoster"
     code, stale = invoke("stale roster")

@@ -12,7 +12,7 @@ from psycopg import Error, IsolationLevel
 from requests import RequestException
 
 from . import engine
-from .config import Settings
+from .config import ConfigurationError, Settings
 from .database import connection
 from .espn_client import FetchResult
 from .loader import load_run
@@ -257,6 +257,9 @@ def run_once(settings: Settings, scope: WorkerScope, raw_root: Path = Path("data
             result.views, _ = _check_views(sync.fetches, scope, now)
             result.status, result.error = "SYNC_FAILED", "required_views_expired"
             return result
+    except ConfigurationError as exc:
+        result.status, result.error = "CONFIGURATION_ERROR", str(exc)
+        return result
     except OPERATIONAL_ERRORS as exc:
         result.error = type(exc).__name__
         return result
