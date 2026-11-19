@@ -104,7 +104,7 @@ def test_received_accept_rate_uses_linked_responses_and_keeps_unlinked_unresolve
     # p3 never gets a response: unresolved, not counted as a decline.
     team2 = _scope(2)
     signals = _Signals(2, WINDOW)
-    trade_signals(signals, team2, [_scope(1), team2], {2026: txns}, {}, {})
+    trade_signals(signals, team2, {2026: txns}, {}, {})
 
     rows = _by_name(signals)
     accept = rows["trade_received_accept_rate_linked"]
@@ -124,12 +124,12 @@ def test_sparse_team_history_falls_back_to_league_then_neutral():
     scopes = [_scope(1), _scope(2), _scope(3)]
 
     sparse = _Signals(3, WINDOW)
-    trade_signals(sparse, scopes[2], scopes, {2026: txns}, {}, {})
+    trade_signals(sparse, scopes[2], {2026: txns}, {}, {})
     row = _by_name(sparse)["trade_received_accept_rate_linked"]
     assert (row.value, row.sample_size, row.basis, row.confidence) == (2 / 5, 1, LEAGUE_FALLBACK, "low")
 
     empty = _Signals(3, WINDOW)
-    trade_signals(empty, scopes[2], scopes, {2026: []}, {}, {})
+    trade_signals(empty, scopes[2], {2026: []}, {}, {})
     row = _by_name(empty)["trade_received_accept_rate_linked"]
     assert (row.value, row.basis, row.confidence) == (None, NEUTRAL, "insufficient")
 
@@ -148,7 +148,7 @@ def test_package_and_partner_tendencies_follow_owner_across_seasons():
     owner_map = {(2025, 2): ["m-b"], (2026, 2): ["m-b"], (2026, 3): ["m-c"]}
     positions = {2: 2, 4: 3, 5: 3, 7: 1}
     signals = _Signals(1, WINDOW)
-    trade_signals(signals, _scope(1, prior=7), [_scope(1, prior=7)], txns, owner_map, positions)
+    trade_signals(signals, _scope(1, prior=7), txns, owner_map, positions)
 
     rows = _by_name(signals)
     assert rows["trade_one_for_one_share"].value == 2 / 3
@@ -218,7 +218,7 @@ def test_top_partner_share_is_zero_when_all_history_is_with_current_co_owners():
     txns = {2025: [_trade(f"c{i}", "completed_trade", [(i, 5, 6), (10 + i, 6, 5)], season=2025) for i in range(3)]}
     scope = ManagerScope("team:2026:1", None, {2026: {1}, 2025: {5, 6}}, shared_team=True)
     signals = _Signals(1, WINDOW)
-    trade_signals(signals, scope, [scope], txns, {}, {})
+    trade_signals(signals, scope, txns, {}, {})
     assert _by_name(signals)["trade_top_partner_share"].value == 0
 
 
@@ -226,7 +226,20 @@ def test_proposals_without_a_known_proposer_are_not_counted_as_received():
     moves = [(10, 1, 2), (20, 2, 1)]
     txns = [_trade("p", "trade_proposal", moves, proposer=None), _trade("r", "trade_decline", moves, hours=1)]
     signals = _Signals(1, WINDOW)
-    trade_signals(signals, _scope(1), [_scope(1), _scope(2)], {2026: txns}, {}, {})
+    trade_signals(signals, _scope(1), {2026: txns}, {}, {})
     rows = _by_name(signals)
     assert rows["trade_received_accept_rate_linked"].sample_size == 0
     assert rows["trade_received_unresolved"].value == 0
+
+
+def test_league_response_rate_counts_each_linked_response_once_including_departed_teams():
+    # Team 9 (a departed manager) received and accepted three proposals; team 1 has none.
+    txns = []
+    for i in range(3):
+        m = [(100 + i, 2, 9), (200 + i, 9, 2)]
+        txns += [_trade(f"p{i}", "trade_proposal", m, season=2025, proposer=2, hours=i),
+                 _trade(f"r{i}", "completed_trade", m, season=2025, hours=i)]
+    signals = _Signals(1, WINDOW)
+    trade_signals(signals, _scope(1), {2025: txns}, {}, {})
+    row = _by_name(signals)["trade_received_accept_rate_linked"]
+    assert (row.value, row.basis) == (1.0, LEAGUE_FALLBACK)

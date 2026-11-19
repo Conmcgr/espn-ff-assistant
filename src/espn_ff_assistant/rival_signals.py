@@ -203,7 +203,6 @@ def _received_responses(
 def trade_signals(
     signals: _Signals,
     scope: ManagerScope,
-    league_scopes: list[ManagerScope],
     txns_by_season: dict[int, list[Transaction]],
     owner_map: dict[tuple[int, int], list[str]],
     positions: dict[int, int],
@@ -213,10 +212,8 @@ def trade_signals(
     pairs = link_trade_responses(all_txns)
 
     team_rate, unresolved = _received_responses(scope, pairs)
-    league_rate = _Rate(0, 0)
-    for other in league_scopes:
-        r, _ = _received_responses(other, pairs)
-        league_rate = _Rate(league_rate.hits + r.hits, league_rate.n + r.n)
+    league_responses = [r for p, r in pairs if r is not None and p.provider_team_id is not None]
+    league_rate = _Rate(sum(r.category == "completed_trade" for r in league_responses), len(league_responses))
     provenance = "transactions:trade_proposal->completed_trade|trade_decline (matched items)"
     signals.rate("trade_received_accept_rate_linked", team_rate, league_rate, provenance)
     signals.add("trade_received_unresolved", unresolved, unresolved + team_rate.n, provenance, seasons)
@@ -382,7 +379,7 @@ def compute_rival_signals(
         scope = team_scopes[tid]
         others = [s for other, s in team_scopes.items() if other != tid]
         position_need(signals, [e for e in roster if e.provider_team_id == tid], positions, slot_counts, roster_week)
-        trade_signals(signals, scope, list(team_scopes.values()), txns_by_season, owner_map, positions)
+        trade_signals(signals, scope, txns_by_season, owner_map, positions)
         faab_signals(signals, scope, others, txns_by_season, budgets, remaining)
         standings_signals(signals, standings, playoff_seats)
         out.extend(signals.rows)
