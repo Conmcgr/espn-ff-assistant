@@ -8,7 +8,7 @@ from itertools import combinations
 from math import sqrt
 
 from .lineup import BENCH_SLOT, IR_SLOT, optimize
-from .waivers import INJURED_STATUSES, PoolPlayer, roster_value
+from .waivers import INJURED_STATUSES, PoolPlayer, roster_value, select_candidates
 
 ENGINE_VERSION = "trades-1"
 
@@ -79,19 +79,27 @@ def _value(roster: list[PoolPlayer], ctx: TradeContext) -> tuple[float, float]:
     return roster_value(roster, ctx.slot_counts, ctx.remaining_weeks)
 
 
+def _value_key(roster: list[PoolPlayer], ctx: TradeContext) -> tuple[float, float]:
+    next_week, ros = _value(roster, ctx)
+    return ros, next_week
+
+
 def _fill(roster: list[PoolPlayer], pool: list[PoolPlayer], ctx: TradeContext
           ) -> tuple[list[PoolPlayer], list[int]]:
-    ids = {p.pid for p in roster}
-    available = [p for p in pool if p.pid not in ids]
-    vacancies = max(0, ctx.roster_size_limit - len(roster))
-    for count in range(min(vacancies, len(available)), -1, -1):
-        choices = [list(group) for group in combinations(available, count)
-                   if _within_positions([*roster, *group], ctx)]
-        if choices:
-            best = max(choices, key=lambda group: (
-                *reversed(_value([*roster, *group], ctx)), tuple(-p.pid for p in group)))
-            return [*roster, *best], [p.pid for p in best]
-    return list(roster), []
+    roster = list(roster)
+    fills: list[int] = []
+    while len(roster) < ctx.roster_size_limit:
+        ids = {p.pid for p in roster}
+        choices = [p for p in pool if p.pid not in ids
+                   and _within_positions([*roster, p], ctx)]
+        if not choices:
+            break
+        best = max(choices, key=lambda p: (*_value_key([*roster, p], ctx), -p.pid))
+        if _value_key([*roster, best], ctx) <= _value_key(roster, ctx):
+            break
+        roster.append(best)
+        fills.append(best.pid)
+    return roster, fills
 
 
 def _contributions(roster: list[PoolPlayer], ctx: TradeContext) -> dict[int, float]:
@@ -102,13 +110,7 @@ def _contributions(roster: list[PoolPlayer], ctx: TradeContext) -> dict[int, flo
             if assignment.get(p.pid, BENCH_SLOT) not in {BENCH_SLOT, IR_SLOT}}
 
 
-def grade_trade(offer: TradeOffer, ctx: TradeContext) -> TradeGrade:
-    """Grade both lineup deltas with symmetric FA access and independent ROS risk.
-
-    User overflow from receiving extra players may be auto-dropped; partner
-    overflow requires explicit drops. Fills are independent counterfactuals,
-    not promises that both teams can acquire the same free agent.
-    """
+def _legality(offer: TradeOffer, ctx: TradeContext) -> tuple[list[str], list[str]]:
     violations: list[str] = []
     notes: list[str] = []
     user = {p.pid: p for p in ctx.user_roster}
@@ -129,8 +131,14 @@ def grade_trade(offer: TradeOffer, ctx: TradeContext) -> TradeGrade:
         violations.append("locked")
     notes.extend(f"IR player {p.pid} moves; receiving IR placement retained" for p in moving
                  if p.lineup.current_slot == IR_SLOT)
-    if violations:
-        return TradeGrade("illegal", violations, notes)
+    return violations, notes
+
+
+def _post_trade_rosters(offer: TradeOffer, ctx: TradeContext
+                        ) -> tuple[list[PoolPlayer], list[PoolPlayer], list[int], list[str]]:
+    user = {p.pid: p for p in ctx.user_roster}
+    partner = {p.pid: p for p in ctx.partner_roster}
+    give, receive = set(offer.give_ids), set(offer.receive_ids)
     post_user = [p for p in ctx.user_roster if p.pid not in give | set(offer.user_drops)]
     post_user += [partner[pid] for pid in sorted(receive)]
     post_partner = [p for p in ctx.partner_roster if p.pid not in receive | set(offer.partner_drops)]
@@ -144,54 +152,80 @@ def grade_trade(offer: TradeOffer, ctx: TradeContext) -> TradeGrade:
             if _within_positions(kept, ctx):
                 choices.append((kept, drops))
         if choices:
-            post_user, drops = max(choices, key=lambda x: (*reversed(_value(x[0], ctx)),
+            post_user, drops = max(choices, key=lambda x: (*_value_key(x[0], ctx),
                                                           tuple(-pid for pid in x[1])))
             assumed_drops = list(drops)
+    violations: list[str] = []
     if max(len(post_user), len(post_partner)) > ctx.roster_size_limit:
         violations.append("roster_size")
     if not all(_within_positions(r, ctx) for r in (post_user, post_partner)):
         violations.append("position_limit")
-    if violations:
-        return TradeGrade("illegal", violations, notes)
+    return post_user, post_partner, assumed_drops, violations
 
-    occupied = user.keys() | partner.keys()
-    pool = sorted({p.pid: p for p in ctx.free_agents if p.pid not in occupied
-                   and p.availability == "free_agent" and not p.lineup.locked
-                   and p.lineup.current_slot != IR_SLOT}.values(), key=lambda p: p.pid)
-    before_user, ub = _fill(ctx.user_roster, pool, ctx)
-    after_user, ua = _fill(post_user, pool, ctx)
-    before_partner, pb = _fill(ctx.partner_roster, pool, ctx)
-    after_partner, pa = _fill(post_partner, pool, ctx)
 
-    def side(before: list[PoolPlayer], after: list[PoolPlayer], bf: list[int],
-             af: list[int], drops: list[int]) -> SideValue:
-        bn, br = _value(before, ctx)
-        an, ar = _value(after, ctx)
-        return SideValue(an - bn, ar - br, bf, af, drops)
-
-    uv = side(before_user, after_user, ub, ua, assumed_drops)
-    pv = side(before_partner, after_partner, pb, pa, [])
-    base_ros = _value(before_user, ctx)[1]
+def _alternative(roster: list[PoolPlayer], pool: list[PoolPlayer], ctx: TradeContext
+                 ) -> tuple[float, int | None, int | None]:
+    base_ros = _value(roster, ctx)[1]
     alternative, add_id, drop_id = 0.0, None, None
+    ids = {p.pid for p in roster}
+    drops = [p for p in roster if _droppable(p, ctx)]
     for add in pool:
-        if add.pid in {p.pid for p in before_user}:
+        if add.pid in ids:
             continue
-        drops = [p for p in before_user if _droppable(p, ctx)]
-        for drop in ([None] if len(before_user) < ctx.roster_size_limit else []) + drops:
-            changed = [p for p in before_user if drop is None or p.pid != drop.pid] + [add]
+        for drop in ([None] if len(roster) < ctx.roster_size_limit else []) + drops:
+            changed = [p for p in roster if drop is None or p.pid != drop.pid] + [add]
             if not _within_positions(changed, ctx):
                 continue
             gain = _value(changed, ctx)[1] - base_ros
             if gain > alternative:
                 alternative, add_id, drop_id = gain, add.pid, drop.pid if drop else None
-    bc, ac = _contributions(before_user, ctx), _contributions(after_user, ctx)
-    players = {p.pid: p for p in [*before_user, *after_user]}
+    return alternative, add_id, drop_id
+
+
+def _uncertainty(before: list[PoolPlayer], after: list[PoolPlayer], ctx: TradeContext) -> float:
+    bc, ac = _contributions(before, ctx), _contributions(after, ctx)
+    players = {p.pid: p for p in [*before, *after]}
     variance = 0.0
     for pid in bc.keys() | ac.keys():
         cv = (INJURED_ROS_CV if (players[pid].lineup.injury_status or "").upper()
               in INJURED_STATUSES else ROS_CV)
         variance += ((ac.get(pid, 0) - bc.get(pid, 0)) * cv) ** 2
-    sd = sqrt(variance)
+    return sqrt(variance)
+
+
+def _side_value(before: list[PoolPlayer], after: list[PoolPlayer], bf: list[int],
+                af: list[int], drops: list[int], ctx: TradeContext) -> SideValue:
+    bn, br = _value(before, ctx)
+    an, ar = _value(after, ctx)
+    return SideValue(an - bn, ar - br, bf, af, drops)
+
+
+def grade_trade(offer: TradeOffer, ctx: TradeContext) -> TradeGrade:
+    """Grade both lineup deltas with symmetric FA access and independent ROS risk.
+
+    User overflow from receiving extra players may be auto-dropped; partner
+    overflow requires explicit drops. Fills are independent counterfactuals,
+    not promises that both teams can acquire the same free agent.
+    """
+    violations, notes = _legality(offer, ctx)
+    if violations:
+        return TradeGrade("illegal", violations, notes)
+    post_user, post_partner, assumed_drops, violations = _post_trade_rosters(offer, ctx)
+    if violations:
+        return TradeGrade("illegal", violations, notes)
+    occupied = {p.pid for p in [*ctx.user_roster, *ctx.partner_roster]}
+    available = sorted({p.pid: p for p in ctx.free_agents if p.pid not in occupied
+                        and p.availability == "free_agent" and not p.lineup.locked
+                        and p.lineup.current_slot != IR_SLOT}.values(), key=lambda p: p.pid)
+    pool = sorted(select_candidates(available), key=lambda p: p.pid)
+    before_user, ub = _fill(ctx.user_roster, pool, ctx)
+    after_user, ua = _fill(post_user, pool, ctx)
+    before_partner, pb = _fill(ctx.partner_roster, pool, ctx)
+    after_partner, pa = _fill(post_partner, pool, ctx)
+    uv = _side_value(before_user, after_user, ub, ua, assumed_drops, ctx)
+    pv = _side_value(before_partner, after_partner, pb, pa, [], ctx)
+    alternative, add_id, drop_id = _alternative(before_user, pool, ctx)
+    sd = _uncertainty(before_user, after_user, ctx)
     grade = "toss-up" if abs(uv.delta_ros) <= max(sd, MIN_GAIN) else (
         "favorable" if uv.delta_ros > 0 else "unfavorable")
     return TradeGrade(grade, notes=notes, user=uv, partner=pv, user_ros_sd=sd,

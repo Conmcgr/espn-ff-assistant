@@ -8,11 +8,13 @@ extra players can assume least-cost non-IR, unprotected, unlocked drops;
 partner overflow requires explicit drops. The size limit counts all rostered
 players, including IR. IR transfers are allowed and noted.
 
-Both sides receive optimal-lineup next-week and ROS deltas, with best available
+Both sides receive optimal-lineup next-week and ROS deltas, with greedy
 free-agent fills on both baseline and post-trade rosters (ROS first, next-week
 as tiebreaker). Fills are independent counterfactuals, not acquisition guarantees;
-only immediately available free agents qualify. Exact fill/drop searches suit
-bounded fixture pools; large pools can be expensive. The best single no-trade
+only immediately available free agents qualify. Fills and alternatives reuse
+the waiver candidate shortlist (top ROS and per-position next-week candidates).
+Fills take the best marginal ROS/next-week gain per vacancy and stop at no
+positive gain; auto-drop combinations are searched exactly. The best single no-trade
 add/drop alternative and trade gain net of it are reported separately. Grades
 use expected ROS gain, not alternative-adjusted gain. Independent per-player
 ROS contribution-change uncertainty is combined in quadrature, with larger

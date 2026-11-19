@@ -4,6 +4,7 @@ import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
+from time import perf_counter
 
 import pytest
 
@@ -89,7 +90,7 @@ def test_fills_are_symmetric_and_alternative_is_separate():
     offer, ctx = fixture()
     ctx.roster_size_limit = 3
     result = grade_trade(offer, ctx)
-    assert result.user.before_fills == [5]
+    assert result.user.before_fills == []
     assert result.user.after_fills == [5]
     assert result.user.delta_ros == -170
     assert result.net_alternative_ros_gain == result.user.delta_ros - result.alternative_ros_gain
@@ -141,3 +142,35 @@ def test_cli_json_and_missing_fixture():
                            capture_output=True, text=True)
     assert error.returncode == 2
     assert "Invalid fixture" in error.stderr
+
+
+def test_large_pool_fills_quickly_with_best_marginal_players():
+    offer, ctx = fixture()
+    ctx.roster_size_limit = 4
+    ctx.slot_counts = {2: 2, 4: 2}
+    template = ctx.free_agents[0]
+    ctx.free_agents = [replace(template, ros=10, lineup=replace(
+        template.lineup, provider_player_id=100 + i, projection=1)) for i in range(300)]
+    ctx.free_agents[-2] = replace(ctx.free_agents[-2], ros=500, lineup=replace(
+        ctx.free_agents[-2].lineup, projection=50))
+    ctx.free_agents[-1] = replace(ctx.free_agents[-1], ros=600, position="WR", lineup=replace(
+        ctx.free_agents[-1].lineup, projection=60, eligible_slots=frozenset({4})))
+    start = perf_counter()
+    result = grade_trade(offer, ctx)
+    elapsed = perf_counter() - start
+    assert elapsed < 2.0
+    assert result.user.before_fills == [399, 398]
+    assert result.user.after_fills == [398, 399]
+    assert result.partner.before_fills == [399, 398]
+    assert result.partner.after_fills == [399, 398]
+
+
+def test_greedy_fills_skip_zero_gain_and_respect_position_limits():
+    offer, ctx = fixture()
+    ctx.roster_size_limit = 4
+    ctx.position_limits = {"RB": 1}
+    ctx.partner_roster[1] = replace(ctx.partner_roster[1], position="WR", lineup=replace(
+        ctx.partner_roster[1].lineup, eligible_slots=frozenset({4})))
+    result = grade_trade(offer, ctx)
+    assert result.user.before_fills == []
+    assert result.user.after_fills == [5]
