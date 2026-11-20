@@ -256,7 +256,7 @@ def load_run(run: Path, sections: frozenset[str] = frozenset(SECTIONS)) -> dict[
                     entry["season"],
                     entry["view"],
                     entry.get("scoring_period"),
-                    raw_uri,
+                    entry.get("object_uri") or raw_uri,
                     digest or "",
                     entry.get("transport_state", "present"),
                     entry.get("retrieved_at"),

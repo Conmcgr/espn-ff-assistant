@@ -24,6 +24,15 @@ uv run python scripts/check_setup.py
 uv run pytest
 ```
 
+## Private raw archive backends
+
+Archives stay local under `data/raw/<run_id>`; optionally set `RAW_ARCHIVE_URL` or scan/sync's `--archive-url`
+to `file:///absolute/private/path` or `gs://private-bucket/prefix` for league/run-scoped durable storage.
+GCS requires `uv sync --extra gcs` and private bucket IAM; protect raw payloads containing member identifiers.
+Fresh containers hydrate from durable manifests; SHA-256 checks protect hydration and load (legacy manifests still work).
+Preview retention with `uv run python scripts/prune_archive.py --archive-url URL --league-id ID --dry-run`; omit `--dry-run` to delete.
+Defaults retain 400 days and protect the newest five runs; runs without creation metadata are retained.
+
 ## Repository layout
 
 ```text

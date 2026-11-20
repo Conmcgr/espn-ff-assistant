@@ -19,6 +19,7 @@ def main() -> int:
     load_dotenv()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--season", type=int)
+    parser.add_argument("--archive-url", help="Private archive store URL (or RAW_ARCHIVE_URL)")
     parser.add_argument("--weeks-ahead", type=int, default=1)
     parser.add_argument("--pool-limit", type=int, default=300)
     parser.add_argument("--raw-root", type=Path, default=Path("data/raw"))
@@ -32,6 +33,7 @@ def main() -> int:
     result = sync_current(
         settings, args.raw_root, season=args.season, weeks_ahead=args.weeks_ahead,
         pool_limit=args.pool_limit, load=not args.no_load,
+        archive_url=args.archive_url,
     )
     print(json.dumps({
         "run_dir": str(result.run_dir),
