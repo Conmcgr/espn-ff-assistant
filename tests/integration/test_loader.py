@@ -12,9 +12,14 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
+
+from espn_ff_assistant.database import apply_migrations, connection
+from espn_ff_assistant.loader import load_run
+from espn_ff_assistant.repository import Repository
 
 NEEDS_DB = pytest.mark.skipif(
     not os.getenv("TEST_DATABASE_URL"),
@@ -176,14 +181,10 @@ def _make_run(base: Path) -> Path:
     return run
 
 
-@NEEDS_DB
-def test_loader_idempotent(tmp_path, monkeypatch):
-    """Loading the same run twice must produce identical row counts."""
+@pytest.fixture
+def migrated_database(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", os.environ["TEST_DATABASE_URL"])
-    monkeypatch.setattr("espn_ff_assistant.database.load_dotenv", lambda: None)
-
-    # Apply migrations
-    from espn_ff_assistant.database import apply_migrations, connection
+    monkeypatch.setenv("DATABASE_HOSTADDR", "")
 
     # Ensure the two anon roles exist so the REVOKE in migrations doesn't fail.
     with connection() as conn:
@@ -197,6 +198,10 @@ def test_loader_idempotent(tmp_path, monkeypatch):
 
     apply_migrations()
 
+
+@NEEDS_DB
+def test_loader_idempotent(tmp_path, migrated_database):
+    """Loading the same run twice must produce identical row counts."""
     run = _make_run(tmp_path)
 
     def run_loader():
@@ -217,23 +222,8 @@ def test_loader_idempotent(tmp_path, monkeypatch):
 
 
 @NEEDS_DB
-def test_co_owners_stored(tmp_path, monkeypatch):
+def test_co_owners_stored(tmp_path, migrated_database):
     """Team with two owners must have two rows in team_owners."""
-    monkeypatch.setenv("DATABASE_URL", os.environ["TEST_DATABASE_URL"])
-    monkeypatch.setattr("espn_ff_assistant.database.load_dotenv", lambda: None)
-
-    from espn_ff_assistant.database import apply_migrations, connection
-
-    with connection() as conn:
-        for role in ("anon", "authenticated"):
-            count = conn.execute(
-                "SELECT count(*) FROM pg_roles WHERE rolname=%s", (role,)
-            ).fetchone()[0]
-            if count == 0:
-                conn.execute(f'CREATE ROLE "{role}"')
-        conn.commit()
-
-    apply_migrations()
     run = _make_run(tmp_path)
 
     subprocess.run(
@@ -256,3 +246,96 @@ def test_co_owners_stored(tmp_path, monkeypatch):
             """
         ).fetchone()
     assert row[0] >= 2, f"Expected >=2 team_owners rows for co-owned team, got {row[0]}"
+
+
+def _make_roster_run(base: Path, day: int, rosters: dict[int, dict[int, int | None]]) -> Path:
+    """Archive synthetic rosters by week and team (None means an empty roster)."""
+    retrieved_at = f"2026-09-{day}T00:00:00Z"
+    run = base / f"202609{day}T000000Z-current"
+    manifest = []
+
+    def write(view, payload, period=None):
+        folder = run / "2026" / view
+        if period is not None:
+            folder /= f"scoring-period-{period:02d}"
+        folder.mkdir(parents=True)
+        path = folder / "response.json"
+        path.write_text(json.dumps(payload))
+        manifest.append({
+            "season": 2026, "view": view, "scoring_period": period,
+            "raw_path": path.relative_to(run).as_posix(), "retrieved_at": retrieved_at,
+        })
+
+    write("mSettings", {"id": 99999, "settings": {"rosterSettings": {"lineupSlotCounts": {"0": 1}}}})
+    write("mTeam", {"teams": [{"id": 1}, {"id": 2}]})
+
+    def player_entry(pid):
+        return {
+            "playerId": pid, "lineupSlotId": 20,
+            "playerPoolEntry": {"player": {
+                "fullName": f"QB {pid}", "defaultPositionId": 1,
+                "stats": [
+                    {"seasonId": 2026, "scoringPeriodId": week, "statSourceId": 1,
+                     "statSplitTypeId": 1, "appliedTotal": 20}
+                    for week in (1, 2)
+                ],
+            }},
+        }
+
+    for week, teams in rosters.items():
+        write("mRoster", {"teams": [
+            {"id": team, "roster": {"entries": [player_entry(pid)] if pid is not None else []}}
+            for team, pid in teams.items()
+        ]}, week)
+    for week in (1, 2):
+        write("kona_player_info", {"players": [
+            {"id": 2999, "status": "FREEAGENT", "player": {"defaultPositionId": 1}},
+        ]}, week)
+    (run / "manifest.jsonl").write_text("\n".join(json.dumps(entry) for entry in manifest))
+    return run
+
+
+def _recommend(*args, expect_success=True):
+    result = subprocess.run(
+        [sys.executable, "scripts/recommend.py", *args],
+        capture_output=True, text=True, cwd=Path(__file__).resolve().parents[2],
+    )
+    if not expect_success:
+        assert result.returncode == 1, result.stdout
+        return result.stderr
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+@NEEDS_DB
+def test_scan_replays_roster_after_same_week_sync(tmp_path, migrated_database):
+    original = _make_roster_run(tmp_path, 24, {1: {1: 2001, 2: 2003}})
+    later = _make_roster_run(tmp_path, 25, {1: {1: 2003, 2: 2001}, 2: {1: 2004, 2: 2001}})
+    load_run(original)
+    _recommend("whoami", "--season", "2026", "--team", "1")
+
+    week_one = ("scan", "--season", "2026", "--week", "1", "--as-of")
+    cutoff = "2026-09-24T00:00:00Z"
+    first_scan = _recommend(*week_one, cutoff)
+    assert "Start QB 2001" in first_scan
+
+    load_run(later)
+    assert _recommend(*week_one, cutoff) == first_scan
+    assert "Start QB 2003" in _recommend(*week_one, "2026-09-25T00:00:00Z")
+    assert "Start QB 2001" in _recommend("scan", "--season", "2026", "--week", "2", "--as-of", cutoff)
+    missing = _recommend(*week_one, "2026-09-23T23:59:59Z", expect_success=False)
+    assert "No roster snapshot for team 1" in missing
+
+    load_run(original)
+    assert "Start QB 2003" in _recommend(*week_one, "2026-09-25T00:00:00Z")
+    with connection() as conn:
+        repo = Repository(conn)
+        league_id = repo.league_id(99999)
+        weekly = repo.roster_at(league_id, 2026, 1, 1)
+        assert [entry.provider_player_id for entry in weekly] == [2003]
+
+    load_run(_make_roster_run(tmp_path, 26, {1: {1: None}}))
+    with connection() as conn:
+        repo = Repository(conn)
+        empty = repo.roster_as_of(league_id, 2026, 1, 1, datetime.fromisoformat("2026-09-26T00:00:00Z"))
+        assert empty == []
