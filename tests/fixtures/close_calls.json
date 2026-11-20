@@ -1,0 +1,221 @@
+{
+  "_comment": "Synthetic league state for the close-call reasoning dry run; every name and id is invented.",
+  "now": "2026-10-04T16:30:00+00:00",
+  "season": 2026,
+  "week": 5,
+  "remaining_weeks": 10,
+  "faab_remaining": 62,
+  "slot_counts": {
+    "0": 1,
+    "2": 2,
+    "4": 2,
+    "6": 1,
+    "23": 1,
+    "16": 1,
+    "17": 1,
+    "20": 7
+  },
+  "kickoffs": {
+    "1": "2026-10-04T17:00:00+00:00",
+    "2": "2026-10-04T17:00:00+00:00",
+    "3": "2026-10-04T20:25:00+00:00",
+    "4": "2026-10-04T16:00:00+00:00",
+    "5": "2026-10-05T00:20:00+00:00"
+  },
+  "roster": [
+    {
+      "id": 101,
+      "name": "Quinn Ardent",
+      "pos": "QB",
+      "team": 1,
+      "slot": 0,
+      "proj": 21.0,
+      "ros": 210
+    },
+    {
+      "id": 102,
+      "name": "Pat Bellamy",
+      "pos": "QB",
+      "team": 3,
+      "slot": 20,
+      "proj": 14.0,
+      "ros": 140
+    },
+    {
+      "id": 201,
+      "name": "Rory Castell",
+      "pos": "RB",
+      "team": 1,
+      "slot": 2,
+      "proj": 17.5,
+      "ros": 170
+    },
+    {
+      "id": 202,
+      "name": "Dale Fenwick",
+      "pos": "RB",
+      "team": 2,
+      "slot": 2,
+      "proj": 13.2,
+      "ros": 120
+    },
+    {
+      "id": 203,
+      "name": "Ike Galloway",
+      "pos": "RB",
+      "team": 3,
+      "slot": 20,
+      "proj": 6.0,
+      "ros": 50
+    },
+    {
+      "id": 301,
+      "name": "Wes Harrow",
+      "pos": "WR",
+      "team": 2,
+      "slot": 4,
+      "proj": 16.0,
+      "ros": 150,
+      "injury": "QUESTIONABLE"
+    },
+    {
+      "id": 302,
+      "name": "Milo Ingram",
+      "pos": "WR",
+      "team": 3,
+      "slot": 4,
+      "proj": 15.0,
+      "ros": 140
+    },
+    {
+      "id": 303,
+      "name": "Nico Jarrett",
+      "pos": "WR",
+      "team": 5,
+      "slot": 20,
+      "proj": 13.0,
+      "ros": 120
+    },
+    {
+      "id": 304,
+      "name": "Owen Keller",
+      "pos": "WR",
+      "team": 1,
+      "slot": 23,
+      "proj": 12.5,
+      "ros": 95
+    },
+    {
+      "id": 601,
+      "name": "Theo Lindqvist",
+      "pos": "TE",
+      "team": 1,
+      "slot": 6,
+      "proj": 9.0,
+      "ros": 85
+    },
+    {
+      "id": 602,
+      "name": "Ty Moreau",
+      "pos": "TE",
+      "team": 3,
+      "slot": 20,
+      "proj": 8.2,
+      "ros": 70
+    },
+    {
+      "id": 161,
+      "name": "Northport D/ST",
+      "pos": "D/ST",
+      "team": 2,
+      "slot": 16,
+      "proj": 7.0,
+      "ros": 60
+    },
+    {
+      "id": 171,
+      "name": "Kit Novak",
+      "pos": "K",
+      "team": 4,
+      "slot": 17,
+      "proj": 8.0,
+      "ros": 80
+    },
+    {
+      "id": 172,
+      "name": "Kurt Oyelaran",
+      "pos": "K",
+      "team": 4,
+      "slot": 20,
+      "proj": 7.4,
+      "ros": 70
+    },
+    {
+      "id": 205,
+      "name": "Abe Quill",
+      "pos": "RB",
+      "team": 5,
+      "slot": 20,
+      "proj": 4.0,
+      "ros": 30
+    },
+    {
+      "id": 305,
+      "name": "Ben Ruiz",
+      "pos": "WR",
+      "team": 5,
+      "slot": 20,
+      "proj": 4.5,
+      "ros": 30
+    }
+  ],
+  "pool": [
+    {
+      "id": 402,
+      "name": "Eli Thorne",
+      "pos": "WR",
+      "team": 3,
+      "proj": 7.0,
+      "ros": 129.0,
+      "availability": "free_agent",
+      "owned": 22.0,
+      "change": 6.8
+    },
+    {
+      "id": 403,
+      "name": "Gus Upton",
+      "pos": "RB",
+      "team": 2,
+      "proj": 5.0,
+      "ros": 128.0,
+      "availability": "free_agent",
+      "owned": 9.0,
+      "change": 0.4
+    },
+    {
+      "id": 405,
+      "name": "Ivo Whitlock",
+      "pos": "RB",
+      "team": 5,
+      "proj": 6.0,
+      "ros": 128.5,
+      "availability": "free_agent",
+      "owned": 31.0,
+      "change": 7.2
+    },
+    {
+      "id": 404,
+      "name": "Hal Vance",
+      "pos": "WR",
+      "team": 1,
+      "proj": 5.0,
+      "ros": 125.0,
+      "availability": "free_agent",
+      "owned": 3.0,
+      "change": 0.1
+    }
+  ],
+  "claimed_since_snapshot": [
+    405
+  ]
+}
