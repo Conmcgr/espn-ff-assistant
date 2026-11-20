@@ -53,6 +53,13 @@ def test_roster_snapshots_one_per_team():
     assert tids == {1, 2}
 
 
+def test_missing_roster_is_not_an_empty_snapshot():
+    payload = _make_payload([{"id": 1}, {"id": 2, "roster": {"entries": None}}, _make_team(3, [])])
+    assert [snap["provider_team_id"] for snap in roster_snapshots(2024, 5, payload)] == [3]
+    assert roster_entries(2024, 5, payload) == []
+    assert players(payload) == []
+
+
 def test_roster_entries_returns_all_entries():
     payload = _make_payload([_make_team(1, [100, 200])])
     entries = roster_entries(2024, 5, payload)
