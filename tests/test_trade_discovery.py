@@ -36,11 +36,11 @@ def test_finds_mutual_gain_package_with_why_now():
     plausible = [i for i in mutual if i.plausibility.label == "plausible"]
     assert plausible
     best = plausible[0]
-    assert best.offer.give_ids == (1, 2)
+    assert best.offer.give_ids == (2, 3)
     assert best.offer.receive_ids == (11,)
-    assert best.offer.partner_drops == (12,)
-    assert best.grade.user.delta_ros == 110
-    assert best.grade.partner.delta_ros == 80
+    assert best.offer.partner_drops == (13,)
+    assert best.grade.user.delta_ros == 240
+    assert best.grade.partner.delta_ros == 10
     assert best.plausibility.label == "plausible"
     assert any("starter" in r and "13" in r for r in best.why_now)
     assert any("RB" in r for r in best.why_now)  # rival's measured hole

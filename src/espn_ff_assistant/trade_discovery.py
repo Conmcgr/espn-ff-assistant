@@ -254,7 +254,11 @@ def discover(ctx: DiscoveryContext) -> list[TradeIdea]:
                 quality = grade.net_alternative_ros_gain if grade.net_alternative_ros_gain is not None else grade.user.delta_ros
                 if quality < MIN_QUALITY:
                     continue
-                if best is None or grade.user.delta_ros > best[1].user.delta_ros:
+                # Equal user gains tie-break on partner gain so a legal variant
+                # that drops a starter loses to one that drops a bench piece.
+                if best is None or (
+                    grade.user.delta_ros, grade.partner.delta_ros
+                ) > (best[1].user.delta_ros, best[1].partner.delta_ros):
                     best = (offer, grade)
             if best is None:
                 continue
