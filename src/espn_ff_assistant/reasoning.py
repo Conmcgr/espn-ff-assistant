@@ -23,8 +23,8 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from .config import ConfigurationError
@@ -486,7 +486,9 @@ def review(
             outcome.status = "kept_default"
         else:
             action = case.option(verdict.choice).action
-            outcome.problems = revalidate(case, case.option(verdict.choice), state)
+            elapsed = timedelta(seconds=clock() - started)
+            outcome.problems = revalidate(case, case.option(verdict.choice),
+                                          replace(state, now=state.now + elapsed))
             moved = _players_moved(action)
             if moved & committed:
                 outcome.problems.append("conflicts with an earlier reviewed move")
