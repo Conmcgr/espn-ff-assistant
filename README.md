@@ -1,5 +1,23 @@
 # ESPN Fantasy Football Assistant
 
+## Notification policy (outbox only)
+
+`uv run python scripts/worker.py --league ID --user UUID --team ID --season YEAR --week N --outbox`
+opts into atomic recommendation/evidence + delivery-intent persistence. Without
+`--outbox`, the worker retains its shadow-only behavior. Nothing sends SMS.
+JSON includes each record's `send`, `batch`, or `suppress` disposition and reason.
+`--now` accepts an aware ISO timestamp for deterministic fixture replays.
+
+Defaults are quiet hours **22:00–09:00 America/Chicago** and **2** immediate
+non-urgent notifications per local day. Set `quiet_hours` and
+`max_daily_notifications` in user preferences to override; invalid values fall
+back to defaults. Urgent actions bypass quiet hours and caps; a notify action may
+escalate once to urgent. Duplicate actions do not requeue. Non-actionable records
+are saved as recommendations but never create delivery intents.
+
+See [the outbox contract](docs/notification-outbox.md) for TTL, dedupe and the
+future sender/reply integration boundaries.
+
 Persistence and manager-analytics foundation for the proactive fantasy-football
 agent described in [the project handoff](fantasy_football_agent_handoff_detailed.md).
 

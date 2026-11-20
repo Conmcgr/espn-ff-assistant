@@ -1,10 +1,11 @@
-"""Run one scoped shadow scan; print a JSON result without sending alerts."""
+"""Run one scoped scan; print JSON without sending alerts."""
 
 from __future__ import annotations
 
 import argparse
 import json
 from dataclasses import asdict
+from datetime import datetime
 from uuid import UUID
 
 from espn_ff_assistant.config import ConfigurationError, Settings
@@ -25,14 +26,18 @@ def main() -> int:
     parser.add_argument("--team", type=positive_int, required=True, help="Expected ESPN team ID")
     parser.add_argument("--season", type=positive_int, required=True)
     parser.add_argument("--week", type=positive_int, required=True, help="Current ESPN scoring period")
+    parser.add_argument("--outbox", action="store_true", help="Persist decisions and delivery intents; never send")
+    parser.add_argument("--now", type=datetime.fromisoformat, help="Aware evaluation time for fixture replay")
     args = parser.parse_args()
+    if args.now is not None and args.now.tzinfo is None:
+        parser.error("--now must include a timezone offset")
     scope = WorkerScope(args.league, str(args.user), args.team, args.season, args.week)
     try:
         settings = Settings.from_env()
     except ConfigurationError as exc:
         result = WorkerResult(scope, "CONFIGURATION_ERROR", error=str(exc))
     else:
-        result = run_once(settings, scope)
+        result = run_once(settings, scope, outbox=args.outbox, now=args.now)
     print(json.dumps(asdict(result), sort_keys=True))
     if result.status in {"ACTIONABLE", "NO_ACTION"}:
         return 0
