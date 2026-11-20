@@ -346,12 +346,12 @@ class Repository:
             (self._season_id(league_id, season), sync_id, observed_at),
         )
 
-    def fired_trigger_keys(self, league_id: str, season: int) -> set[str]:
+    def fired_triggers(self, league_id: str, season: int) -> dict[str, datetime]:
         rows = self._conn.execute(
-            "SELECT trigger_key FROM trigger_firings WHERE league_season_id=%s",
+            "SELECT trigger_key, fired_at FROM trigger_firings WHERE league_season_id=%s",
             (self._season_id(league_id, season),),
         ).fetchall()
-        return {row[0] for row in rows}
+        return {row[0]: row[1] for row in rows}
 
     def record_trigger_firing(
         self, league_id: str, season: int, trigger_key: str, fired_at: datetime,

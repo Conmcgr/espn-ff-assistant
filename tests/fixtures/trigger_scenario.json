@@ -66,5 +66,8 @@
       "expired_at": null
     }
   ],
-  "fired": ["game_settled:2026-11-19:thursday"]
+  "fired": {
+    "window_final:2026-11-19:thursday": "2026-11-20T04:00:00+00:00",
+    "game_settled:2026-11-19:thursday": "2026-11-23T04:00:00+00:00"
+  }
 }

@@ -75,19 +75,39 @@ class TestWindowStates:
 class TestDueTriggers:
     def test_settle_delay_boundary(self):
         kickoff = datetime(2026, 11, 22, 18, 0, tzinfo=UTC)
-        observed = NOW - timedelta(minutes=44)
-        assert not due_triggers(NOW, [game("a", kickoff, GameState.FINAL, observed)], [])
-        observed = NOW - timedelta(minutes=46)
-        fired = due_triggers(NOW, [game("a", kickoff, GameState.FINAL, observed)], [])
-        assert [t.kind for t in fired] == ["game_settled"]
+        window = "2026-11-22:sunday_early"
+        games = [game("a", kickoff, GameState.FINAL, NOW)]
+        # First verified-final observation stamps a marker, no scan yet.
+        first = {t.kind for t in due_triggers(NOW, games, {})}
+        assert "window_final" in first and "game_settled" not in first
+        # The delay runs from the marker, not the latest retrieval.
+        fired = {f"window_final:{window}": NOW - timedelta(minutes=44)}
+        assert "game_settled" not in {t.kind for t in due_triggers(NOW, games, {}, fired)}
+        fired = {f"window_final:{window}": NOW - timedelta(minutes=46)}
+        kinds = {t.kind for t in due_triggers(NOW, games, {}, fired)}
+        assert "game_settled" in kinds
+        # Re-observing final games later does not restart the delay.
+        games = [game("a", kickoff, GameState.FINAL, NOW)]
+        assert "game_settled" in {
+            t.kind for t in due_triggers(NOW, games, {}, fired)
+        }
 
     def test_outcome_scoring_after_all_final(self):
         kickoff = datetime(2026, 11, 23, 1, 15, tzinfo=UTC)
-        games = [game("a", kickoff, GameState.FINAL, NOW - timedelta(hours=13))]
-        kinds = {t.kind for t in due_triggers(NOW, games, [])}
-        assert "outcome_scoring" in kinds
+        games = [game("a", kickoff, GameState.FINAL, NOW)]
+        week = "2026-11-22"  # local date of the week's last game
+        first = {t.kind for t in due_triggers(NOW, games, {})}
+        assert "all_final" in first and "outcome_scoring" not in first
+        fired = {f"all_final:{week}": NOW - timedelta(hours=13)}
+        keys = {t.key for t in due_triggers(NOW, games, {}, fired)}
+        assert f"outcome_scoring:{week}" in keys
         games.append(game("b", kickoff, GameState.IN_PROGRESS, NOW))
-        assert "outcome_scoring" not in {t.kind for t in due_triggers(NOW, games, [])}
+        assert "outcome_scoring" not in {t.kind for t in due_triggers(NOW, games, {}, fired)}
+        # A different scoring period gets a different key.
+        other = {t.key for t in due_triggers(
+            NOW, games[:1], {}, {"all_final:9": NOW - timedelta(hours=13)}, period=9
+        )}
+        assert "outcome_scoring:9" in other
 
     def test_urgent_pre_lock_bypasses_batching(self):
         soon = NOW + timedelta(minutes=30)
@@ -120,15 +140,18 @@ class TestDueTriggers:
     def test_fired_keys_suppress(self):
         kickoff = datetime(2026, 11, 22, 18, 0, tzinfo=UTC)
         games = [game("a", kickoff, GameState.FINAL, NOW - timedelta(hours=1))]
-        fired = {"game_settled:2026-11-22:sunday_early"}
-        assert not due_triggers(NOW, games, [], fired=fired)
+        fired = {
+            "window_final:2026-11-22:sunday_early": NOW - timedelta(hours=1),
+            "game_settled:2026-11-22:sunday_early": NOW - timedelta(minutes=30),
+        }
+        assert "game_settled" not in {t.kind for t in due_triggers(NOW, games, [], fired)}
 
     def test_deterministic_replay(self):
         kickoff = datetime(2026, 11, 22, 18, 0, tzinfo=UTC)
         games = [game("a", kickoff, GameState.FINAL, NOW - timedelta(hours=1))]
         opps = [opp("starter_out", "starter_out:7:1:11", NOW + timedelta(minutes=20))]
         first = due_triggers(NOW, games, opps)
-        second = due_triggers(NOW, games, opps, fired={t.key for t in first})
+        second = due_triggers(NOW, games, opps, fired={t.key: NOW for t in first})
         assert second == []
 
     def test_naive_now_rejected(self):
@@ -159,7 +182,8 @@ class TestFixtureScenario:
         assert states["2026-11-19:thursday"].state == "settled"
         assert states["2026-11-22:sunday_early"].state == "waiting"
         keys = {t.key for t in due_triggers(
-            NOW, list(batch.games.values()), opps, fired=set(data["fired"])
+            NOW, list(batch.games.values()), opps,
+            fired={k: datetime.fromisoformat(v) for k, v in data["fired"].items()},
         )}
         assert "game_settled:2026-11-19:thursday" not in keys  # already fired
         assert "urgent_pre_lock:starter_out:7:777002:11" in keys

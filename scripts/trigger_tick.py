@@ -91,7 +91,11 @@ def main() -> int:
         print(f"batch={batch.state}; holding all ticks")
         return 1
 
-    fired: set[str] = set(scenario.get("fired", []))
+    fired: dict[str, datetime] = {
+        k: _parse_ts(v) for k, v in scenario.get("fired", {}).items()
+    }
+    if args.league and args.season is None:
+        parser.error("--league requires --season")
     if "opportunities" in scenario:
         opportunities = [_opportunity(o) for o in scenario["opportunities"]]
     elif args.league:
@@ -105,15 +109,17 @@ def main() -> int:
             if league is None:
                 parser.error(f"league {args.league} not loaded")
             opportunities = repo.stored_opportunities(league, args.season)
-            fired |= repo.fired_trigger_keys(league, args.season)
+            fired |= repo.fired_triggers(league, args.season)
     else:
         opportunities = []
 
     config = _config(args)
-    report = coverage_report(args.now, list(batch.games.values()), opportunities, fired, config)
+    games = list(batch.games.values())
+    report = coverage_report(args.now, games, opportunities, fired, config)
     for key, window in sorted(report["windows"].items()):
         print(f"window {key}: {window['state']} — {window['detail']}")
-    triggers = due_triggers(args.now, list(batch.games.values()), opportunities, fired, config)
+    triggers = due_triggers(args.now, games, opportunities, fired, config,
+                            period=args.week)
     if not triggers:
         print("HOLD: no triggers due")
     for trigger in sorted(triggers, key=lambda t: t.fires_at):

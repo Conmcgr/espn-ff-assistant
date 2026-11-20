@@ -9,7 +9,7 @@ deadlines bypass batching. All times are league-local (America/New_York),
 so DST boundaries are handled by zoneinfo, never by hour arithmetic.
 """
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -83,9 +83,15 @@ def _waiver_clear_at(opportunity: StoredOpportunity) -> datetime | None:
 
 
 def window_states(
-    games: Sequence[GameStatus], now: datetime, config: TriggerConfig = DEFAULT_CONFIG
+    games: Sequence[GameStatus], now: datetime, config: TriggerConfig = DEFAULT_CONFIG,
+    fired: Mapping[str, datetime] | None = None,
 ) -> dict[str, WindowReport]:
-    """Group games into league-local windows and report settle readiness."""
+    """Group games into league-local windows and report settle readiness.
+
+    Settle timing uses the recorded `window_final:` marker (first verified-final
+    observation) when present, so the delay never restarts on later ticks.
+    """
+    fired = fired or {}
     windows: dict[str, list[GameStatus]] = {}
     for game in games:
         if game.kickoff_at is None:
@@ -102,15 +108,15 @@ def window_states(
                 None, f"{len(pending)} game(s) not final ({', '.join(states)})",
             )
             continue
-        last_final = max(
+        final_since = fired.get(f"window_final:{key}") or max(
             g.final_observed_at for g in group
             if g.final_observed_at is not None
         )
-        settles_at = last_final + config.settle_delay
+        settles_at = final_since + config.settle_delay
         if now >= settles_at:
             reports[key] = WindowReport(
                 key, tuple(sorted(g.provider_game_id for g in group)), "settled",
-                settles_at, f"final observed {last_final.isoformat()}",
+                settles_at, f"final since {final_since.isoformat()}",
             )
         else:
             reports[key] = WindowReport(
@@ -124,26 +130,39 @@ def due_triggers(
     now: datetime,
     games: Sequence[GameStatus],
     opportunities: Sequence[StoredOpportunity],
-    fired: Collection[str] = (),
+    fired: Mapping[str, datetime] | None = None,
     config: TriggerConfig = DEFAULT_CONFIG,
+    period: int | None = None,
 ) -> list[Trigger]:
     """Triggers due at `now`, minus keys already fired.
 
     Deterministic and replay-safe: the same inputs produce the same keys,
     and a recorded firing suppresses the trigger on overlapping ticks.
+    `fired` maps trigger keys to their recorded firing time; completion
+    markers (`window_final:*`, `all_final:*`) pin the moment a window was
+    first verified final so delays never restart on later ticks.
     """
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
-    fired = set(fired)
+    fired = dict(fired or {})
     triggers: dict[str, Trigger] = {}
 
     def emit(trigger: Trigger) -> None:
         if trigger.key not in fired and trigger.fires_at <= now:
             triggers[trigger.key] = trigger
 
-    # Game-completion ticks, one per settled window.
-    reports = window_states(games, now, config)
+    # Game-completion ticks: mark first verified-final, then settle after delay.
+    reports = window_states(games, now, config, fired)
     for report in reports.values():
+        marker = f"window_final:{report.key}"
+        if report.state == "waiting":
+            continue
+        if marker not in fired:
+            emit(Trigger(
+                marker, "window_final", now, False,
+                f"{len(report.game_ids)} game(s) verified final",
+            ))
+            continue
         if report.state == "settled" and report.settles_at is not None:
             emit(Trigger(
                 f"game_settled:{report.key}", "game_settled", report.settles_at,
@@ -153,12 +172,21 @@ def due_triggers(
     # Outcome scoring once the week's last game is verified final.
     live = [g for g in games if g.kickoff_at is not None]
     if live and all(g.state == GameState.FINAL for g in live):
-        last_final = max(g.final_observed_at for g in live if g.final_observed_at)
-        fires_at = last_final + config.outcome_delay
-        emit(Trigger(
-            "outcome_scoring", "outcome_scoring", fires_at, False,
-            f"all {len(live)} game(s) final; scoring settles {fires_at.isoformat()}",
-        ))
+        week_key = str(period) if period is not None else max(
+            _local(g.kickoff_at).date().isoformat() for g in live if g.kickoff_at
+        )
+        marker = f"all_final:{week_key}"
+        if marker not in fired:
+            emit(Trigger(
+                marker, "all_final", now, False,
+                f"all {len(live)} game(s) verified final",
+            ))
+        else:
+            fires_at = fired[marker] + config.outcome_delay
+            emit(Trigger(
+                f"outcome_scoring:{week_key}", "outcome_scoring", fires_at, False,
+                f"all {len(live)} game(s) final since {fired[marker].isoformat()}",
+            ))
 
     pending: list[StoredOpportunity] = [
         o for o in opportunities
@@ -213,11 +241,12 @@ def coverage_report(
     now: datetime,
     games: Sequence[GameStatus],
     opportunities: Sequence[StoredOpportunity],
-    fired: Collection[str] = (),
+    fired: Mapping[str, datetime] | None = None,
     config: TriggerConfig = DEFAULT_CONFIG,
 ) -> Mapping[str, object]:
     """What the tick would do, for scripts and tests."""
-    reports = window_states(games, now, config)
+    fired = dict(fired or {})
+    reports = window_states(games, now, config, fired)
     triggers = due_triggers(now, games, opportunities, fired, config)
     due = {t.key: t for t in triggers}
     skipped = sorted(set(fired) - set(due))
