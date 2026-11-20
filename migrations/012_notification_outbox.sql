@@ -12,7 +12,7 @@ CREATE TABLE notification_outbox (
     deliver_after TIMESTAMPTZ NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'sending', 'sent', 'failed', 'unknown')),
+        CHECK (status IN ('pending', 'sending', 'sent', 'failed', 'unknown', 'superseded')),
     sent_at TIMESTAMPTZ,
     attempts INTEGER NOT NULL DEFAULT 0,
     provider_message_id TEXT,
