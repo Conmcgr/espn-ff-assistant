@@ -74,6 +74,13 @@ uv run python scripts/score_outcomes.py --season 2026 --week 4           # after
 uv run python scripts/backtest.py                                        # private report in data/derived/
 ```
 
+For roster replay, pass `scan --season 2026 --week 4 --as-of 2026-09-24T15:00:00Z`.
+The scan uses each team's latest roster observed by that time and at or before
+the requested week. After migrating, reload any archived runs you want to
+replay with `scripts/load_run.py` (or run a new sync for current scans). Rosters
+loaded before versioning have no trusted timestamp and cannot be used for replay
+unless their original archive is reloaded.
+
 See `docs/recommendation-engine-handoff.md` for design, calibration, and
 known gaps.
 
