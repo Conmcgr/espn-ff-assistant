@@ -172,6 +172,7 @@ class ProGame:
     opponent_pro_team_id: int | None
     kickoff_at: datetime | None
     is_bye: bool
+    provider_game_id: int | None = None
 
 
 @dataclass
@@ -344,6 +345,26 @@ class Repository:
                VALUES (%s,%s,%s)""",
             (self._season_id(league_id, season), sync_id, observed_at),
         )
+
+    def fired_triggers(self, league_id: str, season: int) -> dict[str, datetime]:
+        rows = self._conn.execute(
+            "SELECT trigger_key, fired_at FROM trigger_firings WHERE league_season_id=%s",
+            (self._season_id(league_id, season),),
+        ).fetchall()
+        return {row[0]: row[1] for row in rows}
+
+    def record_trigger_firing(
+        self, league_id: str, season: int, trigger_key: str, fired_at: datetime,
+        detail: dict[str, Any] | None = None,
+    ) -> bool:
+        """Record a fired trigger once; returns False if it already fired."""
+        cursor = self._conn.execute(
+            """INSERT INTO trigger_firings (league_season_id, trigger_key, fired_at, detail)
+               VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+            (self._season_id(league_id, season), trigger_key, fired_at,
+             json.dumps(detail or {})),
+        )
+        return cursor.rowcount == 1
 
     # ---- League helpers ----------------------------------------------------
 
@@ -774,7 +795,8 @@ class Repository:
 
     def pro_games(self, season: int, scoring_period: int) -> dict[int, ProGame]:
         rows = self._conn.execute(
-            """SELECT pro_team_id, scoring_period, opponent_pro_team_id, kickoff_at, is_bye
+            """SELECT pro_team_id, scoring_period, opponent_pro_team_id, kickoff_at,
+                      is_bye, provider_game_id
                FROM pro_team_games WHERE season=%s AND scoring_period=%s""",
             (season, scoring_period),
         ).fetchall()
