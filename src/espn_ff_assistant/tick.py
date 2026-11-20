@@ -15,15 +15,17 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 import requests
 
+from espn_ff_assistant.archive import RawArchive
 from espn_ff_assistant.config import ConfigurationError, Settings
 from espn_ff_assistant.database import connection
-from espn_ff_assistant.espn_client import ESPNClient, fetch_scoreboard
+from espn_ff_assistant.espn_client import ESPNClient, FetchResult, fetch_scoreboard
 from espn_ff_assistant.game_status import GameStatus, normalize_game_status
+from espn_ff_assistant.object_store import from_url
 from espn_ff_assistant.repository import Repository, StoredOpportunity, WorkerTick
 from espn_ff_assistant.sync import sync_periods
 from espn_ff_assistant.triggers import DEFAULT_CONFIG, Trigger, TriggerConfig, due_triggers
@@ -109,6 +111,7 @@ class TickResult:
     worker: WorkerResult | None = None
     error: str | None = None
     dry_run: bool = False
+    inputs_run_id: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -120,7 +123,8 @@ class TickResult:
             self.plan.reasons, self.worker.status if self.worker else None,
             self.worker.run_id if self.worker else None, self.error,
             {"markers": [t.key for t in self.plan.markers],
-             "deferred": [t.key for t in self.plan.deferred]},
+             "deferred": [t.key for t in self.plan.deferred],
+             "inputs_run_id": self.inputs_run_id},
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -130,6 +134,7 @@ class TickResult:
             "scan_due": self.plan.scan_due, "reasons": self.plan.reasons,
             "markers": [t.key for t in self.plan.markers],
             "deferred": [t.key for t in self.plan.deferred],
+            "inputs_run_id": self.inputs_run_id,
         }
         if self.worker is not None:
             out["worker"] = {"status": self.worker.status, "run_id": self.worker.run_id,
@@ -142,12 +147,27 @@ class TickResult:
 Worker = Callable[[Settings, WorkerScope, Path], WorkerResult]
 
 
-def _current_inputs(settings: Settings, season: int, now: datetime) -> tuple[int, list[GameStatus]]:
+def _tick_archive(settings: Settings, raw_root: Path) -> RawArchive:
+    """Private archive for the inputs a tick decides on, beside the worker's runs."""
+    url = os.environ.get("RAW_ARCHIVE_URL")
+    run_id = f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{uuid4().hex}-tick"
+    return RawArchive(raw_root / f"league-{settings.league_id}", run_id,
+                      league_id=settings.league_id, store=from_url(url) if url else None)
+
+
+def _current_inputs(
+    settings: Settings, season: int, now: datetime,
+    save: Callable[[FetchResult], object] | None = None,
+) -> tuple[int, list[GameStatus]]:
     status = ESPNClient(settings).fetch(season, "mStatus")
+    if save:
+        save(status)
     if status.state != "present" or not status.payload:
         raise LookupError("league_status_unavailable")
     period, _ = sync_periods(status.payload, 0)
     board = fetch_scoreboard(season, period)
+    if save:
+        save(board)
     observed = datetime.fromisoformat(board.retrieved_at) if board.retrieved_at else now
     batch = normalize_game_status(board.payload, observed_at=observed, fetch_state=board.state)
     if batch.state not in ("present", "empty"):
@@ -199,7 +219,11 @@ def _tick(
     config: TickConfig, result: TickResult, now: datetime, dry_run: bool,
     raw_root: Path, worker: Worker,
 ) -> None:
-    period, games = _current_inputs(settings, config.season, now)
+    archive = None if dry_run else _tick_archive(settings, raw_root)
+    if archive is not None:
+        result.inputs_run_id = archive.run_dir.name
+    period, games = _current_inputs(settings, config.season, now,
+                                    archive.save if archive else None)
     result.scoring_period = period
     opportunities = repo.stored_opportunities(league, config.season)
     fired = repo.fired_triggers(league, config.season)

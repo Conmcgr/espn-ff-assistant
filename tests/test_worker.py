@@ -516,5 +516,8 @@ def test_scheduled_tick_round_trip(synthetic_ledger, monkeypatch):
     ticks = heartbeats()
     assert [t.status for t in ticks] == ["SCAN_FAILED"] * 3 + ["HOLD", follow_up.status, "SCANNED"]
     assert ticks[-1].worker_run_id == scanned.worker.run_id
+    inputs = Path(f"data/raw/league-{SCOPE.league_id}") / ticks[-1].detail["inputs_run_id"]
+    archived = [json.loads(line)["view"] for line in (inputs / "manifest.jsonl").read_text().splitlines()]
+    assert archived == ["mStatus", "scoreboard"] and planned.inputs_run_id is None
     assert tick.assess_health(later + timedelta(minutes=21), ticks, last_scan) == [
         "repeated_failures"]
