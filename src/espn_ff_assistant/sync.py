@@ -7,6 +7,7 @@ transport state; credentials are never written.
 
 from __future__ import annotations
 
+import os
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -18,6 +19,7 @@ from .archive import RawArchive
 from .config import Settings
 from .espn_client import ESPNClient, FetchResult
 from .loader import load_run
+from .object_store import from_url
 from .repository import LIVE_RUN_SUFFIX
 
 SEASON_VIEWS = ("mStatus", "mSettings", "mTeam", "mStandings")
@@ -67,11 +69,14 @@ def sync_current(
     weeks_ahead: int = 1,
     pool_limit: int = 300,
     load: bool = True,
+    archive_url: str | None = None,
 ) -> SyncResult:
     season = season or settings.last_season
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     run_id = f"{stamp}-{uuid4().hex}{LIVE_RUN_SUFFIX}"
-    archive = RawArchive(raw_root, run_id)
+    archive_url = archive_url or os.environ.get("RAW_ARCHIVE_URL")
+    archive = RawArchive(raw_root, run_id, league_id=settings.league_id,
+                         store=from_url(archive_url) if archive_url else None)
     client = ESPNClient(settings)
     results: list[FetchResult] = []
 

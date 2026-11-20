@@ -7,13 +7,14 @@ including `no_action`, so outcomes can be scored later.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from . import lineup as lineup_engine
+from . import reasoning
 from . import waivers as waiver_engine
-from .lineup import SLOT_NAMES, LineupPlayer, LineupRecommendation
+from .lineup import IR_SLOT, SLOT_NAMES, LineupPlayer, LineupRecommendation
 from .manager_stats import POSITION_NAMES
 from .repository import PlayerStatus, Repository
 from .waivers import Comparable, Competitor, PoolPlayer, WaiverContext, WaiverOption
@@ -42,6 +43,7 @@ class EngineResult:
     records: list[dict[str, Any]]      # rows ready for Repository.save_recommendation
     evidence: list[list[dict[str, Any]]]
     detail: Any
+    players: list[PoolPlayer] = field(default_factory=list)  # every player the run valued
 
 
 @dataclass
@@ -264,7 +266,7 @@ def run_lineup(ctx: _Context) -> EngineResult:
         "payload": payload, "alternatives": None, "confidence": confidence,
         "engine_version": lineup_engine.ENGINE_VERSION,
     }
-    return EngineResult([record], [evidence], rec)
+    return EngineResult([record], [evidence], rec, players)
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +391,95 @@ def run_waivers(ctx: _Context, *, allow_empty_pool: bool = False) -> EngineResul
             "confidence": None, "engine_version": waiver_engine.ENGINE_VERSION,
         })
         evidence.append(list(base_evidence))
-    return EngineResult(records, evidence, options)
+    return EngineResult(records, evidence, options, roster + pool)
+
+
+# ---------------------------------------------------------------------------
+# Close-call reasoning
+# ---------------------------------------------------------------------------
+
+def _kickoffs(ctx: _Context, statuses: dict[int, PlayerStatus]) -> dict[int, datetime | None]:
+    games = ctx.repo.pro_games(ctx.season, ctx.period)
+    return {
+        pid: (games[s.pro_team_id].kickoff_at if s.pro_team_id in games else None)
+        for pid, s in statuses.items()
+    }
+
+
+def current_state(ctx: _Context, now: datetime, player_ids: list[int]) -> tuple[
+        reasoning.CurrentState, dict[int, datetime | None]]:
+    """Fresh roster, pool, lock and eligibility facts for revalidation, plus kickoffs."""
+    repo = ctx.repo
+    entries = repo.roster_as_of(ctx.league_id, ctx.season, ctx.period, ctx.team_id, now) or []
+    roster_ids = [e.provider_player_id for e in entries]
+    available = repo.available_players(ctx.league_id, ctx.season, ctx.period, now)
+    statuses = repo.player_status(
+        ctx.league_id, ctx.season, ctx.period, sorted(set(roster_ids) | set(player_ids)), now,
+    )
+    byes = _byes(repo, ctx.season, ctx.period)
+    _, _, protected = _preferences(ctx)
+    state = reasoning.CurrentState(
+        now=now,
+        roster_ids=frozenset(roster_ids),
+        available_ids=frozenset(s.provider_player_id for s in available),
+        locked_ids=frozenset(pid for pid, s in statuses.items()
+                             if s.lineup_locked and s.snapshot_period == ctx.period),
+        unavailable_ids=frozenset(
+            pid for pid, s in statuses.items()
+            if (s.injury_status or "").upper() in lineup_engine.UNAVAILABLE_STATUSES
+            or s.pro_team_id in byes
+        ),
+        protected_ids=protected,
+        ir_ids=frozenset(e.provider_player_id for e in entries if e.lineup_slot_id == IR_SLOT),
+        eligible_slots={pid: frozenset(s.eligible_slots) for pid, s in statuses.items()},
+    )
+    return state, _kickoffs(ctx, statuses)
+
+
+def close_call_cases(
+    lineup_result: EngineResult | None,
+    waiver_result: EngineResult | None,
+    deadlines: dict[int, datetime | None],
+) -> list[reasoning.Case]:
+    cases: list[reasoning.Case] = []
+    if lineup_result is not None:
+        players = lineup_result.players
+        cases += reasoning.lineup_cases(
+            lineup_result.detail, [p.lineup for p in players], deadlines,
+            {p.pid: p.position for p in players},
+        )
+    if waiver_result is not None:
+        cases += reasoning.waiver_cases(
+            waiver_result.detail, {p.pid: p for p in waiver_result.players}, deadlines,
+            limit=MAX_STORED_WAIVER_OPTIONS,
+        )
+    return cases
+
+
+def review_close_calls(
+    ctx: _Context,
+    results: list[EngineResult],
+    model: reasoning.ReasoningModel | None,
+    budget: reasoning.Budget = reasoning.DEFAULT_BUDGET,
+    now: datetime | None = None,
+) -> tuple[list[EngineResult], list[reasoning.Outcome]]:
+    """Send close calls through one bounded reasoning pass and fold the outcomes back.
+
+    Results are lineup and/or waiver runs from this context. Obvious decisions
+    are never sent; with no model, records only gain a `disabled` trace.
+    """
+    lineup_result = next((r for r in results if r.records and r.records[0]["kind"] == "lineup"), None)
+    waiver_result = next((r for r in results if r.records and r.records[0]["kind"] == "waiver"), None)
+    ids = sorted({p.pid for r in results for p in r.players})
+    state, deadlines = current_state(ctx, now or datetime.now(UTC), ids)
+    cases = close_call_cases(lineup_result, waiver_result, deadlines)
+    outcomes = reasoning.review(cases, model, state, budget)
+    reviewed = []
+    for result in results:
+        mine = [o for o in outcomes if result is (lineup_result if o.case.kind == "lineup" else waiver_result)]
+        records, evidence = reasoning.apply(result.records, result.evidence, mine)
+        reviewed.append(EngineResult(records, evidence, result.detail, result.players))
+    return reviewed, outcomes
 
 
 def save(ctx: _Context, result: EngineResult) -> list[str]:

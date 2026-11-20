@@ -1,0 +1,185 @@
+{
+  "context": {
+    "slot_counts": {
+      "2": 1,
+      "4": 1,
+      "23": 1
+    },
+    "remaining_weeks": 10,
+    "current_week": 10,
+    "trade_deadline_week": 12,
+    "roster_size_limit": 3,
+    "user_team": {
+      "team_id": 1,
+      "name": "Connor",
+      "roster": [
+        {
+          "id": 1,
+          "name": "User RB1",
+          "position": "RB",
+          "slots": [
+            2,
+            23
+          ],
+          "next": 23,
+          "ros": 230
+        },
+        {
+          "id": 2,
+          "name": "User RB2",
+          "position": "RB",
+          "slots": [
+            2,
+            23
+          ],
+          "next": 21,
+          "ros": 210
+        },
+        {
+          "id": 3,
+          "name": "User WR3",
+          "position": "WR",
+          "slots": [
+            4,
+            23
+          ],
+          "next": 10,
+          "ros": 100
+        }
+      ]
+    },
+    "rivals": [
+      {
+        "team_id": 2,
+        "name": "WR-heavy rival",
+        "roster": [
+          {
+            "id": 11,
+            "name": "Rival WR11",
+            "position": "WR",
+            "slots": [
+              4,
+              23
+            ],
+            "next": 30,
+            "ros": 300
+          },
+          {
+            "id": 12,
+            "name": "Rival WR12",
+            "position": "WR",
+            "slots": [
+              4,
+              23
+            ],
+            "next": 20,
+            "ros": 60,
+            "projection": 6
+          },
+          {
+            "id": 13,
+            "name": "Rival RB13",
+            "position": "RB",
+            "slots": [
+              2,
+              23
+            ],
+            "next": 0,
+            "ros": 0,
+            "injury_status": "OUT"
+          }
+        ]
+      },
+      {
+        "team_id": 3,
+        "name": "RB-heavy rival",
+        "roster": [
+          {
+            "id": 31,
+            "name": "Rival WR31",
+            "position": "WR",
+            "slots": [
+              4,
+              23
+            ],
+            "next": 24,
+            "ros": 240
+          },
+          {
+            "id": 32,
+            "name": "Rival RB32",
+            "position": "RB",
+            "slots": [
+              2,
+              23
+            ],
+            "next": 40,
+            "ros": 400
+          },
+          {
+            "id": 33,
+            "name": "Rival RB33",
+            "position": "RB",
+            "slots": [
+              2,
+              23
+            ],
+            "next": 14,
+            "ros": 140
+          }
+        ]
+      }
+    ],
+    "free_agents": [
+      {
+        "id": 20,
+        "name": "FA RB20",
+        "position": "RB",
+        "slots": [
+          2,
+          23
+        ],
+        "next": 25,
+        "ros": 250
+      },
+      {
+        "id": 21,
+        "name": "FA WR21",
+        "position": "WR",
+        "slots": [
+          4,
+          23
+        ],
+        "next": 9,
+        "ros": 90
+      }
+    ]
+  },
+  "signals": {
+    "2": {
+      "accept_rate": 0.6,
+      "accept_rate_basis": "league_fallback",
+      "one_for_one_share": 0.8,
+      "position_depth": {
+        "WR": 1,
+        "RB": -1
+      },
+      "games_back_of_playoff_line": 1.5
+    },
+    "3": {
+      "position_depth": {
+        "WR": 0,
+        "RB": 1
+      },
+      "games_back_of_playoff_line": 0.0
+    }
+  },
+  "opportunities": [
+    {
+      "kind": "starter_out",
+      "team_id": 2,
+      "player_id": 13,
+      "detail": "RB13 ruled out this week"
+    }
+  ]
+}
