@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from espn_ff_assistant.normalize import players as norm_players
 from espn_ff_assistant.normalize import rosters as norm_rosters
 from espn_ff_assistant.normalize import season as norm_season
 from espn_ff_assistant.normalize import txns as norm_txns
+from espn_ff_assistant.repository import Repository
 
 # ---------------------------------------------------------------------------
 # Archive helpers
@@ -410,6 +412,7 @@ def load_run(run: Path, sections: frozenset[str] = frozenset(SECTIONS)) -> dict[
                     )
 
             # ---- Rosters and players --------------------------------------------
+            repo = Repository(conn)
             for season, period, data, raw_uri in _all_period_payloads(run, "mRoster"):
                 season_id = season_ids.get(season)
                 if season_id is None:
@@ -441,34 +444,15 @@ def load_run(run: Path, sections: frozenset[str] = frozenset(SECTIONS)) -> dict[
                         ),
                     )
 
+                entries_by_team = defaultdict(list)
+                for team_id, pid, slot, acq, stat in norm_rosters.roster_entries(season, period, data):
+                    entries_by_team[team_id].append((pid, slot, acq, stat))
                 for snap in norm_rosters.roster_snapshots(season, period, data):
-                    snap_id = conn.execute(
-                        """INSERT INTO roster_snapshots
-                               (league_season_id, scoring_period, provider_team_id, raw_payload_uri)
-                           VALUES (%s,%s,%s,%s)
-                           ON CONFLICT (league_season_id, scoring_period, provider_team_id)
-                           DO UPDATE SET raw_payload_uri=EXCLUDED.raw_payload_uri
-                           RETURNING id""",
-                        (season_id, period, snap["provider_team_id"], raw_uri),
-                    ).fetchone()[0]
-
-                    # Clear and reload entries so reruns don't accumulate duplicates.
-                    conn.execute("DELETE FROM roster_entries WHERE roster_snapshot_id=%s", (snap_id,))
-                    entries = norm_rosters.roster_entries(season, period, data)
-                    team_entries = [e for e in entries if e[0] == snap["provider_team_id"]]
-                    if team_entries:
-                        with conn.cursor() as cur:
-                            cur.executemany(
-                                """INSERT INTO roster_entries
-                                       (roster_snapshot_id, provider_player_id,
-                                        lineup_slot_id, acquisition_type, applied_stat_total)
-                                   VALUES (%s,%s,%s,%s,%s)
-                                   ON CONFLICT (roster_snapshot_id, provider_player_id, lineup_slot_id)
-                                   DO UPDATE SET
-                                       acquisition_type=EXCLUDED.acquisition_type,
-                                       applied_stat_total=EXCLUDED.applied_stat_total""",
-                                [(snap_id, pid, slot, acq, stat) for _, pid, slot, acq, stat in team_entries],
-                            )
+                    team_id = snap["provider_team_id"]
+                    repo.save_roster_snapshot(
+                        season_id, period, team_id, sync_id, retrieved_at.get(raw_uri),
+                        raw_uri, entries_by_team[team_id],
+                    )
 
             # ---- Matchups from mBoxscore payloads ------------------------------
             # Collect all (period, boxscore, settings) triples per season.
