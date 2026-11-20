@@ -4,12 +4,16 @@ import json
 import os
 import runpy
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 from uuid import uuid4
 
 import pytest
+from psycopg import IsolationLevel
+from psycopg.errors import SerializationFailure
 
 from espn_ff_assistant.config import Settings
 from espn_ff_assistant.database import apply_migrations, connection
@@ -311,3 +315,113 @@ def test_opportunity_demo(tmp_path, monkeypatch, capsys, payloads):
     })
     starter['lineupSlotId'] = 20
     scan('scan4', (0, 0, 0, 2))
+
+
+@pytest.fixture
+def synthetic_ledger(tmp_path, monkeypatch, payloads):
+    if not os.getenv("TEST_DATABASE_URL"):
+        pytest.skip("set TEST_DATABASE_URL")
+    monkeypatch.setattr(sys.modules[__name__], "SCOPE", replace(
+        SCOPE, league_id=80000 + uuid4().int % 1000000000,
+    ))
+    payloads["mSettings"]["id"] = SCOPE.league_id
+    monkeypatch.setenv("DATABASE_URL", os.environ["TEST_DATABASE_URL"])
+    monkeypatch.setenv("ESPN_LEAGUE_ID", str(SCOPE.league_id))
+    monkeypatch.setenv("ESPN_S2", "synthetic-only")
+    monkeypatch.setenv("ESPN_SWID", "synthetic-only")
+    monkeypatch.chdir(tmp_path)
+    apply_migrations(ROOT / "migrations")
+    starter = payloads["mRoster"]["teams"][0]["roster"]["entries"][0]
+    starter["playerPoolEntry"]["player"]["injuryStatus"] = "OUT"
+    game = payloads["proTeamSchedules_wl"]["settings"]["proTeams"][0]["proGamesByScoringPeriod"]["4"][0]
+    game["date"] = int((datetime.now(UTC) + timedelta(hours=2)).timestamp() * 1000)
+
+    def fetch(self, season, view, *, scoring_period=None, **kwargs):
+        return _fetch(view, payloads.get(view, {}), datetime.now(UTC), scoring_period)
+
+    monkeypatch.setattr(ESPNClient, "fetch", fetch)
+
+    def load_scan():
+        sync = sync_current(Settings.from_env(), Path("data/raw"), season=SCOPE.season,
+                            scoring_period=SCOPE.scoring_period, load=False)
+        load_run(sync.run_dir)
+        with connection() as conn:
+            repo = Repository(conn)
+            user = repo.default_user_id()
+            league = repo.league_id(SCOPE.league_id, user_id=user)
+            repo.set_user_team(user, league, SCOPE.season, SCOPE.team_id)
+            return league, repo.completed_sync_id(league, sync.run_dir.name)
+
+    return load_scan
+
+
+@pytest.mark.parametrize("existing_state", [False, True])
+def test_concurrent_opportunity_scans(synthetic_ledger, existing_state):
+    league, first_sync = synthetic_ledger()
+    _, second_sync = synthetic_ledger()
+    now = datetime.now(UTC)
+    if existing_state:
+        with connection() as conn:
+            Repository(conn).lock_opportunity_season(league, SCOPE.season)
+
+    with connection() as first, connection() as second:
+        first.isolation_level = second.isolation_level = IsolationLevel.REPEATABLE_READ
+        first_repo = Repository(first, player_sync_id=first_sync)
+        second_repo = Repository(second, player_sync_id=second_sync)
+        assert second_repo.latest_opportunity_observation(league, SCOPE.season) is None
+        recorded = record_scan(first_repo, league, SCOPE.season, SCOPE.scoring_period, first_sync, now)
+        assert recorded["counts"]["new"] == 1
+        started = Event()
+
+        def competing_scan():
+            started.set()
+            return record_scan(second_repo, league, SCOPE.season, SCOPE.scoring_period,
+                               second_sync, now + timedelta(seconds=1))
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            pending = executor.submit(competing_scan)
+            assert started.wait(timeout=5)
+            first.commit()
+            with pytest.raises(SerializationFailure):
+                pending.result(timeout=5)
+        second.rollback()
+
+    with connection() as conn:
+        repo = Repository(conn, player_sync_id=second_sync)
+        assert len(repo.stored_opportunities(league, SCOPE.season)) == 1
+        assert [event.change for event in repo.opportunity_events_for_sync(
+            league, SCOPE.season, first_sync,
+        )] == ["new"]
+        assert repo.opportunity_events_for_sync(league, SCOPE.season, second_sync) == []
+        assert not repo.opportunity_scan_processed(league, SCOPE.season, second_sync)
+        retried = record_scan(repo, league, SCOPE.season, SCOPE.scoring_period,
+                              second_sync, now + timedelta(seconds=1))
+        assert retried["counts"] == {"new": 0, "changed": 0, "unchanged": 1, "expired": 0}
+
+    with connection() as conn:
+        repo = Repository(conn)
+        assert [event.change for event in repo.opportunity_events_for_sync(
+            league, SCOPE.season, second_sync,
+        )] == ["unchanged"]
+
+
+def test_worker_serialization_failure_rolls_back(synthetic_ledger, monkeypatch, capsys):
+    league, _ = synthetic_ledger()
+
+    def conflicting_scan(repo, league, season, period, sync_id, observed_at):
+        repo.lock_opportunity_season(league, season)
+        repo.insert_opportunity_scan(league, season, sync_id, observed_at)
+        raise SerializationFailure("synthetic concurrent ledger update")
+
+    monkeypatch.setattr("espn_ff_assistant.opportunities.record_scan", conflicting_scan)
+    with connection() as conn:
+        user = Repository(conn).default_user_id()
+    code, output = _invoke_worker(monkeypatch, capsys, user_id=user, league_id=SCOPE.league_id)
+    assert code == 1 and output["status"] == "EVALUATION_FAILED"
+    assert output["error"] == "SerializationFailure" and not output["opportunities"]
+    with connection() as conn:
+        repo = Repository(conn)
+        sync_id = repo.completed_sync_id(league, output["run_id"])
+        assert not repo.opportunity_scan_processed(league, SCOPE.season, sync_id)
+        assert repo.latest_opportunity_observation(league, SCOPE.season) is None
+        assert repo.stored_opportunities(league, SCOPE.season) == []

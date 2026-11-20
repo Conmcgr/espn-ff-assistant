@@ -18,8 +18,10 @@ every historical attribute value.
 
 `opportunity_scans` records the high-water mark even for scans with no candidates.
 Same/older observations and previously processed sync IDs return `skipped_replay`
-without events. The league-season row lock serializes ledger updates; concurrent
-repeatable-read conflicts fail the worker safely rather than producing duplicates.
+without events. Each recording transaction writes a per-league-season ledger-state
+row before reading the ledger. Concurrent repeatable-read snapshots that miss a
+committed ledger update fail serialization and roll back rather than writing a
+stale diff. A later worker run can retry from a fresh snapshot.
 
 ## Synthetic worker demo
 

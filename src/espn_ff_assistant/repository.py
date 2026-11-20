@@ -234,6 +234,12 @@ class ExecutedDrop:
     process_date: datetime | None
 
 
+@dataclass(frozen=True)
+class OpportunityEvent:
+    opportunity_id: str
+    change: str
+
+
 # ---------------------------------------------------------------------------
 # Repository
 # ---------------------------------------------------------------------------
@@ -250,8 +256,12 @@ class Repository:
         self._player_sync_id = player_sync_id
 
     def lock_opportunity_season(self, league_id: str, season: int) -> None:
-        self._conn.execute("SELECT id FROM league_seasons WHERE id=%s FOR UPDATE",
-                           (self._season_id(league_id, season),))
+        self._conn.execute(
+            """INSERT INTO opportunity_ledger_state (league_season_id, revision)
+               VALUES (%s, 1) ON CONFLICT (league_season_id) DO UPDATE
+               SET revision=opportunity_ledger_state.revision+1""",
+            (self._season_id(league_id, season),),
+        )
 
     def latest_opportunity_observation(self, league_id: str, season: int) -> datetime | None:
         return self._conn.execute(
@@ -313,6 +323,17 @@ class Repository:
                VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
             (opportunity_id, sync_id, observed_at, change),
         )
+
+    def opportunity_events_for_sync(
+        self, league_id: str, season: int, sync_id: str,
+    ) -> list[OpportunityEvent]:
+        rows = self._conn.execute(
+            """SELECT e.opportunity_id, e.change FROM opportunity_events e
+               JOIN opportunities o ON o.id=e.opportunity_id
+               WHERE o.league_season_id=%s AND e.sync_run_id=%s""",
+            (self._season_id(league_id, season), sync_id),
+        ).fetchall()
+        return [OpportunityEvent(str(row[0]), row[1]) for row in rows]
 
     def insert_opportunity_scan(
         self, league_id: str, season: int, sync_id: str, observed_at: datetime,

@@ -1,3 +1,8 @@
+CREATE TABLE opportunity_ledger_state (
+    league_season_id UUID PRIMARY KEY REFERENCES league_seasons(id),
+    revision BIGINT NOT NULL
+);
+
 CREATE TABLE opportunity_scans (
     league_season_id UUID NOT NULL REFERENCES league_seasons(id),
     sync_run_id UUID NOT NULL REFERENCES sync_runs(id),
@@ -31,6 +36,8 @@ CREATE TABLE opportunity_events (
 );
 
 REVOKE ALL ON TABLE opportunity_scans, opportunities, opportunity_events FROM anon, authenticated;
+REVOKE ALL ON TABLE opportunity_ledger_state FROM anon, authenticated;
+ALTER TABLE opportunity_ledger_state ENABLE ROW LEVEL SECURITY;
 ALTER TABLE opportunity_scans ENABLE ROW LEVEL SECURITY;
 ALTER TABLE opportunities ENABLE ROW LEVEL SECURITY;
 ALTER TABLE opportunity_events ENABLE ROW LEVEL SECURITY;
