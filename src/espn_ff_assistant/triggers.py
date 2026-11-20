@@ -243,11 +243,12 @@ def coverage_report(
     opportunities: Sequence[StoredOpportunity],
     fired: Mapping[str, datetime] | None = None,
     config: TriggerConfig = DEFAULT_CONFIG,
+    period: int | None = None,
 ) -> Mapping[str, object]:
     """What the tick would do, for scripts and tests."""
     fired = dict(fired or {})
     reports = window_states(games, now, config, fired)
-    triggers = due_triggers(now, games, opportunities, fired, config)
+    triggers = due_triggers(now, games, opportunities, fired, config, period=period)
     due = {t.key: t for t in triggers}
     skipped = sorted(set(fired) - set(due))
     return {

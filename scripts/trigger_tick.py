@@ -115,7 +115,8 @@ def main() -> int:
 
     config = _config(args)
     games = list(batch.games.values())
-    report = coverage_report(args.now, games, opportunities, fired, config)
+    report = coverage_report(args.now, games, opportunities, fired, config,
+                             period=args.week)
     for key, window in sorted(report["windows"].items()):
         print(f"window {key}: {window['state']} — {window['detail']}")
     triggers = due_triggers(args.now, games, opportunities, fired, config,
