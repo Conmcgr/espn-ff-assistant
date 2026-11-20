@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .archive import RawArchive
 from .config import Settings
@@ -46,6 +47,7 @@ class SyncResult:
     periods: list[int]
     states: dict[str, int]
     counts: dict[str, int]
+    fetches: tuple[FetchResult, ...] = ()
 
 
 def sync_periods(status_payload: dict[str, Any], weeks_ahead: int) -> tuple[int, list[int]]:
@@ -63,13 +65,15 @@ def sync_current(
     raw_root: Path,
     *,
     season: int | None = None,
+    scoring_period: int | None = None,
     weeks_ahead: int = 1,
     pool_limit: int = 300,
     load: bool = True,
     archive_url: str | None = None,
 ) -> SyncResult:
     season = season or settings.last_season
-    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + LIVE_RUN_SUFFIX
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    run_id = f"{stamp}-{uuid4().hex}{LIVE_RUN_SUFFIX}"
     archive_url = archive_url or os.environ.get("RAW_ARCHIVE_URL")
     archive = RawArchive(raw_root, run_id, league_id=settings.league_id,
                          store=from_url(archive_url) if archive_url else None)
@@ -85,7 +89,10 @@ def sync_current(
     status = fetch("mStatus")
     for view in SEASON_VIEWS[1:]:
         fetch(view)
-    current, periods = sync_periods(status.payload or {}, weeks_ahead)
+    if scoring_period is None:
+        current, periods = sync_periods(status.payload or {}, weeks_ahead)
+    else:
+        current, periods = scoring_period, [scoring_period]
 
     fetch("mBoxscore", scoring_period=current)
     for period in periods:
@@ -96,4 +103,4 @@ def sync_current(
 
     states = dict(Counter(r.state for r in results))
     counts = load_run(archive.run_dir) if load else {}
-    return SyncResult(archive.run_dir, season, current, periods, states, counts)
+    return SyncResult(archive.run_dir, season, current, periods, states, counts, tuple(results))
