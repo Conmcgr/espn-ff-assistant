@@ -1,0 +1,70 @@
+{
+  "observed_at": "2026-11-23T03:00:00+00:00",
+  "scoreboard": {
+    "events": [
+      {
+        "id": "g-thu",
+        "date": "2026-11-20T01:15Z",
+        "status": {"type": {"id": "1", "name": "STATUS_FINAL", "state": "post", "completed": true}}
+      },
+      {
+        "id": "g-sun-early-1",
+        "date": "2026-11-22T18:00Z",
+        "status": {"type": {"id": "2", "name": "STATUS_FINAL", "state": "post", "completed": true}}
+      },
+      {
+        "id": "g-sun-early-2",
+        "date": "2026-11-22T18:00Z",
+        "status": {"type": {"id": "3", "name": "STATUS_IN_PROGRESS", "state": "in", "completed": false}}
+      },
+      {
+        "id": "g-sun-late",
+        "date": "2026-11-22T21:25Z",
+        "status": {"type": {"id": "4", "name": "STATUS_SCHEDULED", "state": "pre", "completed": false}}
+      },
+      {
+        "id": "g-sun-night",
+        "date": "2026-11-23T01:20Z",
+        "status": {"type": {"id": "5", "name": "STATUS_POSTPONED", "state": "pre", "completed": false}}
+      },
+      {
+        "id": "g-mon",
+        "date": "2026-11-24T01:15Z",
+        "status": {"type": {"id": "6", "name": "STATUS_SCHEDULED", "state": "pre", "completed": false}}
+      }
+    ]
+  },
+  "opportunities": [
+    {
+      "kind": "player_dropped",
+      "change_key": "player_dropped:tx-9:777001",
+      "provider_player_id": 777001,
+      "provider_team_id": 4,
+      "source_view": "mTransactions2",
+      "expires_at": "2026-11-30T13:00:00+00:00",
+      "attrs": {"availability": "waivers", "waiver_clear_at": "2026-11-23T12:35:00+00:00"},
+      "expired_at": null
+    },
+    {
+      "kind": "starter_out",
+      "change_key": "starter_out:7:777002:11",
+      "provider_player_id": 777002,
+      "provider_team_id": 7,
+      "source_view": "mRoster",
+      "expires_at": "2026-11-23T12:30:00+00:00",
+      "attrs": {"slot": 2, "injury_status": "OUT"},
+      "expired_at": null
+    },
+    {
+      "kind": "starter_out",
+      "change_key": "starter_out:7:777003:11",
+      "provider_player_id": 777003,
+      "provider_team_id": 7,
+      "source_view": "mRoster",
+      "expires_at": "2026-11-23T11:00:00+00:00",
+      "attrs": {"slot": 0, "injury_status": "OUT"},
+      "expired_at": null
+    }
+  ],
+  "fired": ["game_settled:2026-11-19:thursday"]
+}
