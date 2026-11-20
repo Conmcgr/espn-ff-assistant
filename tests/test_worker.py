@@ -274,6 +274,8 @@ def test_outbox_sequence_and_concurrency(tmp_path, monkeypatch, capsys, payloads
         repo.set_user_team(user, league, SCOPE.season, SCOPE.team_id)
 
     def invoke(label):
+        nonlocal now
+        now += timedelta(seconds=1)
         code, result = _invoke_worker(monkeypatch, capsys, user_id=user, league_id=espn_league,
                                      extra=["--outbox", "--now", now.isoformat()])
         assert code == 0, result
