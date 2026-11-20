@@ -229,6 +229,20 @@ class StoredOpportunity:
 
 
 @dataclass(frozen=True)
+class WorkerTick:
+    started_at: datetime
+    finished_at: datetime
+    status: str
+    ok: bool
+    scoring_period: int | None = None
+    reasons: list[str] = field(default_factory=list)
+    worker_status: str | None = None
+    worker_run_id: str | None = None
+    error: str | None = None
+    detail: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ExecutedDrop:
     provider_transaction_id: str
     provider_player_id: int
@@ -365,6 +379,43 @@ class Repository:
              json.dumps(detail or {})),
         )
         return cursor.rowcount == 1
+
+    # ---- Scheduled ticks ---------------------------------------------------
+
+    def try_tick_lock(self, league_id: str) -> bool:
+        """Take the session-level lock that keeps scheduled ticks from overlapping."""
+        row = self._conn.execute(
+            "SELECT pg_try_advisory_lock(hashtextextended('worker_tick:' || %s, 0))",
+            (league_id,),
+        ).fetchone()
+        return bool(row[0])
+
+    def release_tick_lock(self, league_id: str) -> None:
+        self._conn.execute(
+            "SELECT pg_advisory_unlock(hashtextextended('worker_tick:' || %s, 0))",
+            (league_id,),
+        )
+
+    def record_worker_tick(self, league_id: str, season: int, tick: WorkerTick) -> None:
+        self._conn.execute(
+            """INSERT INTO worker_ticks (league_season_id, started_at, finished_at, status, ok,
+                   scoring_period, reasons, worker_status, worker_run_id, error, detail)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (self._season_id(league_id, season), tick.started_at, tick.finished_at,
+             tick.status, tick.ok, tick.scoring_period, json.dumps(tick.reasons),
+             tick.worker_status, tick.worker_run_id, tick.error, json.dumps(tick.detail)),
+        )
+
+    def recent_worker_ticks(self, league_id: str, season: int, limit: int) -> list[WorkerTick]:
+        """Return the newest scheduled ticks first."""
+        rows = self._conn.execute(
+            """SELECT started_at, finished_at, status, ok, scoring_period, reasons,
+                      worker_status, worker_run_id, error, detail
+               FROM worker_ticks WHERE league_season_id=%s
+               ORDER BY started_at DESC LIMIT %s""",
+            (self._season_id(league_id, season), limit),
+        ).fetchall()
+        return [WorkerTick(*row) for row in rows]
 
     # ---- League helpers ----------------------------------------------------
 

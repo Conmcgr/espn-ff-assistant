@@ -1,0 +1,34 @@
+{
+  "displayName": "ff worker unhealthy",
+  "documentation": {
+    "content": "The shadow worker logged a failed tick, a missed schedule, a stale sync or repeated failures. See docs/deployment.md (Alerts and Rollback).",
+    "mimeType": "text/markdown"
+  },
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "Worker error or unhealthy check",
+      "conditionThreshold": {
+        "filter": "resource.type = \"cloud_run_job\" AND metric.type = \"logging.googleapis.com/user/ff_worker_errors\"",
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "aggregations": [
+          {"alignmentPeriod": "1800s", "perSeriesAligner": "ALIGN_COUNT"}
+        ]
+      }
+    },
+    {
+      "displayName": "Health check stopped running",
+      "conditionAbsent": {
+        "filter": "resource.type = \"cloud_run_job\" AND resource.label.job_name = \"ff-health\" AND metric.type = \"run.googleapis.com/job/completed_execution_count\"",
+        "duration": "5400s",
+        "aggregations": [
+          {"alignmentPeriod": "1800s", "perSeriesAligner": "ALIGN_SUM"}
+        ]
+      }
+    }
+  ],
+  "alertStrategy": {"autoClose": "86400s"},
+  "notificationChannels": []
+}
