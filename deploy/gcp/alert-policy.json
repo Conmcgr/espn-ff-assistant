@@ -14,7 +14,7 @@
         "thresholdValue": 0,
         "duration": "0s",
         "aggregations": [
-          {"alignmentPeriod": "1800s", "perSeriesAligner": "ALIGN_COUNT"}
+          {"alignmentPeriod": "1800s", "perSeriesAligner": "ALIGN_SUM"}
         ]
       }
     },
