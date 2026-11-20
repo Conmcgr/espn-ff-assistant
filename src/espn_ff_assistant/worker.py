@@ -11,7 +11,7 @@ from typing import Any
 from psycopg import Error, IsolationLevel
 from requests import RequestException
 
-from . import engine
+from . import engine, opportunities
 from .config import ConfigurationError, Settings
 from .database import connection
 from .espn_client import FetchResult
@@ -49,6 +49,7 @@ class WorkerResult:
     observed_at: str | None = None
     views: dict[str, str] = field(default_factory=dict)
     decisions: dict[str, dict[str, int]] = field(default_factory=dict)
+    opportunities: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
 
 
@@ -251,6 +252,14 @@ def run_once(settings: Settings, scope: WorkerScope, raw_root: Path = Path("data
             results = (
                 engine.run_lineup(ctx),
                 engine.run_waivers(ctx, allow_empty_pool=result.views["kona_player_info"] == "valid_empty"),
+            )
+            now = datetime.now(UTC)
+            if now - observed > MAX_INPUT_AGE:
+                result.views, _ = _check_views(sync.fetches, scope, now)
+                result.status, result.error = "SYNC_FAILED", "required_views_expired"
+                return result
+            result.opportunities = opportunities.record_scan(
+                repo, league, scope.season, scope.scoring_period, sync_id, observed,
             )
         now = datetime.now(UTC)
         if now - observed > MAX_INPUT_AGE:

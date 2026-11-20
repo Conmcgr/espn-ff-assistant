@@ -210,6 +210,37 @@ class DraftPick:
     provider_player_id: int | None
 
 
+@dataclass(frozen=True)
+class Opportunity:
+    kind: str
+    change_key: str
+    provider_player_id: int
+    provider_team_id: int | None
+    source_view: str
+    expires_at: datetime
+    attrs: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class StoredOpportunity:
+    opportunity: Opportunity
+    expired_at: datetime | None
+
+
+@dataclass(frozen=True)
+class ExecutedDrop:
+    provider_transaction_id: str
+    provider_player_id: int
+    provider_team_id: int | None
+    process_date: datetime | None
+
+
+@dataclass(frozen=True)
+class OpportunityEvent:
+    opportunity_id: str
+    change: str
+
+
 # ---------------------------------------------------------------------------
 # Repository
 # ---------------------------------------------------------------------------
@@ -224,6 +255,95 @@ class Repository:
     def __init__(self, conn: Any, *, player_sync_id: str | None = None) -> None:
         self._conn = conn
         self._player_sync_id = player_sync_id
+
+    def lock_opportunity_season(self, league_id: str, season: int) -> None:
+        self._conn.execute(
+            """INSERT INTO opportunity_ledger_state (league_season_id, revision)
+               VALUES (%s, 1) ON CONFLICT (league_season_id) DO UPDATE
+               SET revision=opportunity_ledger_state.revision+1""",
+            (self._season_id(league_id, season),),
+        )
+
+    def latest_opportunity_observation(self, league_id: str, season: int) -> datetime | None:
+        return self._conn.execute(
+            "SELECT max(observed_at) FROM opportunity_scans WHERE league_season_id=%s",
+            (self._season_id(league_id, season),),
+        ).fetchone()[0]
+
+    def opportunity_scan_processed(self, league_id: str, season: int, sync_id: str) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM opportunity_scans WHERE league_season_id=%s AND sync_run_id=%s",
+            (self._season_id(league_id, season), sync_id),
+        ).fetchone() is not None
+
+    def executed_drops(self, league_id: str, season: int, period: int) -> list[ExecutedDrop]:
+        rows = self._conn.execute(
+            """SELECT DISTINCT t.provider_transaction_id, i.provider_player_id,
+                      i.from_provider_team_id, t.process_date
+               FROM transactions t JOIN transaction_items i ON i.transaction_id=t.id
+               WHERE t.league_season_id=%s AND t.scoring_period<=%s
+                 AND t.status='EXECUTED' AND i.item_type='DROP'""",
+            (self._season_id(league_id, season), period),
+        ).fetchall()
+        return [ExecutedDrop(*row) for row in rows]
+
+    def stored_opportunities(self, league_id: str, season: int) -> list[StoredOpportunity]:
+        rows = self._conn.execute(
+            """SELECT kind, change_key, provider_player_id, provider_team_id, source_view,
+                      expires_at, attrs, expired_at FROM opportunities WHERE league_season_id=%s""",
+            (self._season_id(league_id, season),),
+        ).fetchall()
+        return [StoredOpportunity(Opportunity(*row[:7]), row[7]) for row in rows]
+
+    def upsert_opportunity(
+        self, league_id: str, season: int, opportunity: Opportunity, sync_id: str,
+        observed_at: datetime, expired_at: datetime | None,
+    ) -> str:
+        o = opportunity
+        row = self._conn.execute(
+            """INSERT INTO opportunities (league_season_id, kind, change_key,
+                   provider_player_id, provider_team_id, source_view, sync_run_id,
+                   first_observed_at, last_observed_at, expires_at, attrs, expired_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (league_season_id, change_key) DO UPDATE SET
+                   last_observed_at=EXCLUDED.last_observed_at,
+                   expires_at=EXCLUDED.expires_at, attrs=EXCLUDED.attrs,
+                   expired_at=EXCLUDED.expired_at RETURNING id""",
+            (self._season_id(league_id, season), o.kind, o.change_key,
+             o.provider_player_id, o.provider_team_id,
+             o.source_view, sync_id, observed_at, observed_at, o.expires_at,
+             json.dumps(o.attrs), expired_at),
+        ).fetchone()
+        return str(row[0])
+
+    def insert_opportunity_event(
+        self, opportunity_id: str, sync_id: str, observed_at: datetime, change: str,
+    ) -> None:
+        self._conn.execute(
+            """INSERT INTO opportunity_events (opportunity_id, sync_run_id, observed_at, change)
+               VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+            (opportunity_id, sync_id, observed_at, change),
+        )
+
+    def opportunity_events_for_sync(
+        self, league_id: str, season: int, sync_id: str,
+    ) -> list[OpportunityEvent]:
+        rows = self._conn.execute(
+            """SELECT e.opportunity_id, e.change FROM opportunity_events e
+               JOIN opportunities o ON o.id=e.opportunity_id
+               WHERE o.league_season_id=%s AND e.sync_run_id=%s""",
+            (self._season_id(league_id, season), sync_id),
+        ).fetchall()
+        return [OpportunityEvent(str(row[0]), row[1]) for row in rows]
+
+    def insert_opportunity_scan(
+        self, league_id: str, season: int, sync_id: str, observed_at: datetime,
+    ) -> None:
+        self._conn.execute(
+            """INSERT INTO opportunity_scans (league_season_id, sync_run_id, observed_at)
+               VALUES (%s,%s,%s)""",
+            (self._season_id(league_id, season), sync_id, observed_at),
+        )
 
     # ---- League helpers ----------------------------------------------------
 

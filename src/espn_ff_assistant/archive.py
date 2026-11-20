@@ -133,6 +133,8 @@ class RawArchive:
             str(path.relative_to(self.run_dir)) if result.payload is not None else None
         )
         entry.pop("payload", None)
+        if result.season_type is not None:
+            entry["season_type"] = result.season_type
         if result.payload is not None:
             data = path.read_bytes()
             entry.update(sha256=hashlib.sha256(data).hexdigest(), bytes=len(data))

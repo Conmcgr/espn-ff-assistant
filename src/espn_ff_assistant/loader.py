@@ -520,6 +520,7 @@ def load_run(run: Path, sections: frozenset[str] = frozenset(SECTIONS)) -> dict[
                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                            ON CONFLICT (league_season_id, provider_transaction_id) DO UPDATE SET
                                status=EXCLUDED.status,
+                               process_date=COALESCE(EXCLUDED.process_date, transactions.process_date),
                                category=EXCLUDED.category,
                                bid_amount=EXCLUDED.bid_amount,
                                raw_payload_uri=EXCLUDED.raw_payload_uri
