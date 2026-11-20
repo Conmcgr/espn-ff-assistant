@@ -11,7 +11,7 @@ from typing import Any
 from psycopg import Error, IsolationLevel
 from requests import RequestException
 
-from . import engine, opportunities
+from . import engine, opportunities, reasoning
 from .config import ConfigurationError, Settings
 from .database import connection
 from .espn_client import FetchResult
@@ -220,6 +220,7 @@ def run_once(settings: Settings, scope: WorkerScope, raw_root: Path = Path("data
         result.error = "season_outside_configuration"
         return result
     try:
+        model = reasoning.load_model()
         result.status = "SYNC_FAILED"
         with connection() as conn:
             league = _league_for_scope(Repository(conn), scope)
@@ -249,10 +250,12 @@ def run_once(settings: Settings, scope: WorkerScope, raw_root: Path = Path("data
                 return result
             repo = Repository(conn, player_sync_id=sync_id)
             ctx = engine.context(repo, league, scope.user_id, scope.season, scope.scoring_period)
-            results = (
+            results = [
                 engine.run_lineup(ctx),
                 engine.run_waivers(ctx, allow_empty_pool=result.views["kona_player_info"] == "valid_empty"),
-            )
+            ]
+            if model is not None:
+                results, _ = engine.review_close_calls(ctx, results, model)
             now = datetime.now(UTC)
             if now - observed > MAX_INPUT_AGE:
                 result.views, _ = _check_views(sync.fetches, scope, now)

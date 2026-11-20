@@ -6,6 +6,7 @@ Usage:
     uv run python scripts/recommend.py lineup  --season 2026 --week 4 [--save]
     uv run python scripts/recommend.py waivers --season 2026 --week 4 [--save]
     uv run python scripts/recommend.py scan    --season 2026 --week 4 --save
+    uv run python scripts/recommend.py scan    --season 2026 --week 4 --reason offline
     uv run python scripts/recommend.py explain <recommendation_id>
     uv run python scripts/recommend.py feedback <recommendation_id> --action rejected --reason too_much_faab
     uv run python scripts/recommend.py prefs --set streams_dst=true --set stash_injured=true
@@ -20,9 +21,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from espn_ff_assistant import engine
+from espn_ff_assistant import engine, reasoning
 from espn_ff_assistant.config import ConfigurationError, Settings
 from espn_ff_assistant.database import connection, load_dotenv
+from espn_ff_assistant.reasoning_offline import OfflineModel
 from espn_ff_assistant.repository import Repository
 
 DECISION_LABEL = {
@@ -53,6 +55,10 @@ def _print_records(result: engine.EngineResult, ids: list[str] | None, verbose: 
         if rec["kind"] == "lineup":
             for c in rec["payload"]["close_calls"][:3]:
                 print(f"{'':>12}- close call at {c['slot']}: {c['starter']} over {c['alternative']} by {c['margin']}")
+        for t in rec.get("payload", {}).get("reasoning", []):
+            v = t["verdict"]
+            said = f" ({v['verdict']} {v['choice'] or ''}, {v['confidence']})" if v else ""
+            print(f"{'':>12}- reasoning {t['case_id']}: {t['status']}{said}")
     suppressed = sum(1 for r in result.records if r["decision"] == "suppressed")
     if suppressed and not verbose:
         print(f"{'':>12}({suppressed} lower-value option(s) suppressed; --verbose to show)")
@@ -67,12 +73,21 @@ def _context(repo: Repository, args: argparse.Namespace) -> engine._Context:
     return engine.context(repo, league_id, user_id, args.season, args.week, as_of)
 
 
+def _model(choice: str | None) -> reasoning.ReasoningModel | None:
+    if choice == "offline":
+        return OfflineModel()
+    return reasoning.load_model()
+
+
 def cmd_run(args: argparse.Namespace, kinds: list[str]) -> int:
+    model = _model(args.reason) if args.reason else None
     with connection() as conn:
         repo = Repository(conn)
         ctx = _context(repo, args)
-        for kind in kinds:
-            result = engine.run_lineup(ctx) if kind == "lineup" else engine.run_waivers(ctx)
+        results = [engine.run_lineup(ctx) if kind == "lineup" else engine.run_waivers(ctx) for kind in kinds]
+        if args.reason:
+            results, _ = engine.review_close_calls(ctx, results, model)
+        for result in results:
             ids = engine.save(ctx, result) if args.save else None
             _print_records(result, ids, args.verbose)
         if args.save:
@@ -180,6 +195,8 @@ def main() -> int:
         p.add_argument("--as-of", help="ISO timestamp for point-in-time reads (default: now)")
         p.add_argument("--save", action="store_true")
         p.add_argument("--verbose", action="store_true")
+        p.add_argument("--reason", choices=["configured", "offline"],
+                       help="review close calls: the configured model (off unless enabled) or the offline stand-in")
 
     p = sub.add_parser("sync")
     p.add_argument("--season", type=int)
@@ -205,6 +222,8 @@ def main() -> int:
     p.add_argument("--unprotect", action="append", type=int)
 
     args = parser.parse_args()
+    if getattr(args, "reason", None) == "offline" and args.save:
+        parser.error("--reason offline is a dry run; it cannot be combined with --save")
     try:
         if args.command == "lineup":
             return cmd_run(args, ["lineup"])
@@ -219,6 +238,9 @@ def main() -> int:
     except engine.EngineError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
+    except ConfigurationError as error:
+        print(f"Configuration error: {error}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
