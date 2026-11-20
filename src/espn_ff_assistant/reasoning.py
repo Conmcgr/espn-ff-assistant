@@ -214,8 +214,10 @@ def _player_facts(p: LineupPlayer, position: str | None = None, pool: PoolPlayer
 
 
 def _earliest(*times: datetime | None) -> datetime | None:
-    known = [t for t in times if t is not None]
-    return min(known) if known else None
+    """Soonest deadline, or None when any is unknown so revalidation fails closed."""
+    if any(t is None for t in times):
+        return None
+    return min(times)
 
 
 def lineup_cases(
