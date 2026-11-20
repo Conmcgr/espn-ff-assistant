@@ -32,6 +32,9 @@ def _quiet_window(settings: Mapping[str, Any], now: datetime) -> tuple[bool, dat
     quiet = (clock >= start or clock < end) if start > end else start <= clock < end
     end_day = local.date() + timedelta(days=clock >= end)
     digest = datetime.combine(end_day, end, tz).astimezone(UTC)
+    if digest <= now:
+        # Fall-back repeats the wall time; take its second occurrence.
+        digest = datetime.combine(end_day, end.replace(fold=1), tz).astimezone(UTC)
     # Round-trip through UTC to normalize nonexistent spring-forward wall times.
     digest = digest.astimezone(tz).astimezone(UTC)
     return quiet, digest, tz

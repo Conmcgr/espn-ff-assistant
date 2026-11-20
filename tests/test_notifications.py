@@ -76,3 +76,11 @@ def test_deadlines_do_not_mutate_engine_records():
     assert policy([rec], deadlines=[None])[0]["expires_at"] == NOW + timedelta(minutes=15)
     with pytest.raises(ValueError, match="one deadline"):
         policy([rec], deadlines=[])
+
+
+def test_fall_back_repeated_quiet_end_stays_in_future():
+    now = datetime(2026, 11, 1, 7, 30, tzinfo=UTC)  # second 01:30 Chicago
+    settings = {"quiet_hours": {"start": "22:00", "end": "01:45", "timezone": "America/Chicago"}}
+    row = policy([record(now)], settings=settings, now=now, deadlines=[now + timedelta(days=1)])[0]
+    assert row["disposition"] == "batch"
+    assert row["deliver_after"] == datetime(2026, 11, 1, 7, 45, tzinfo=UTC)
