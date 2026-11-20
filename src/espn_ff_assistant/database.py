@@ -38,7 +38,9 @@ def connection() -> Iterator[Any]:
         raise ConfigurationError(
             "PostgreSQL support is not installed; run `uv sync --extra dev`"
         ) from error
-    with psycopg.connect(database_url()) as conn:
+    # Supabase's transaction-mode pooler cannot serve prepared statements;
+    # psycopg auto-prepares repeated queries and raises DuplicatePreparedStatement.
+    with psycopg.connect(database_url(), prepare_threshold=None) as conn:
         yield conn
 
 
