@@ -29,6 +29,7 @@ from typing import Any, Protocol
 
 from .config import ConfigurationError
 from .lineup import (
+    BENCH_SLOT,
     CLOSE_MARGIN,
     NON_STARTING_SLOTS,
     SLOT_NAMES,
@@ -498,6 +499,19 @@ def review(
     return outcomes
 
 
+def _apply_swap(payload: dict[str, Any], case: Case, action: Mapping[str, Any]) -> None:
+    """Rewrite the stored lineup so assignment and moves describe the reviewed choice."""
+    new_slots = {action["start_id"]: SLOT_NAMES.get(action["slot"], str(action["slot"])),
+                 action["bench_id"]: SLOT_NAMES[BENCH_SLOT]}
+    moves = [m for m in payload.get("moves", []) if m["player_id"] not in new_slots]
+    for pid, slot in new_slots.items():
+        payload["assignment"][str(pid)] = slot
+        facts = case.evidence[f"player:{pid}"]
+        if facts["slot"] != slot:
+            moves.append({"player_id": pid, "name": facts["name"], "from": facts["slot"], "to": slot})
+    payload["moves"] = moves
+
+
 def apply(
     records: Sequence[Mapping[str, Any]],
     evidence: Sequence[Sequence[Mapping[str, Any]]],
@@ -524,6 +538,8 @@ def apply(
         rec["confidence"] = o.verdict.confidence
         rec["summary"] = f"{rec['summary']} Close call reviewed: {chosen.label}."
         payload.setdefault("reasoned_actions", []).append(dict(chosen.action))
+        if chosen.action["type"] == "lineup_swap" and "assignment" in payload:
+            _apply_swap(payload, o.case, chosen.action)
         ev[o.case.record_index].extend(
             {"kind": "reasoning_citation", "key": key, "value": o.case.evidence[key],
              "source": ENGINE_VERSION}

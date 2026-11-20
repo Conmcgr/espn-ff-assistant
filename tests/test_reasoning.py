@@ -252,6 +252,33 @@ def test_second_move_reusing_a_player_is_rejected():
     assert "conflicts with an earlier reviewed move" in outcomes[1].problems
 
 
+def test_partial_kickoff_data_leaves_deadline_unknown():
+    players = roster()
+    rec = lineup.optimize(players, SLOTS)
+    (case,) = reasoning.lineup_cases(rec, players, {1: KICKOFF})
+    assert case.deadline is None
+    (outcome,) = reasoning.review([case], OfflineModel(), state())
+    assert outcome.status == "rejected_revalidation" and "deadline unknown" in outcome.problems
+
+
+def test_deadline_is_rechecked_when_the_model_answers():
+    ticks = iter([0.0, 0.0, 0.0, 3600.0, 3600.0])
+    (outcome,) = reasoning.review([lineup_case()], OfflineModel(), state(), clock=lambda: next(ticks))
+    assert outcome.status == "rejected_revalidation" and "deadline passed" in outcome.problems
+
+
+@pytest.mark.parametrize("raw", [
+    {"verdict": "recommend", "confidence": "high", "rationale": "x", "citations": ["margin"], "choice": []},
+    {"verdict": "recommend", "confidence": "high", "rationale": "x", "citations": ["margin"],
+     "choice": "swap", "alternatives": [{"option": {}, "why_not": "x"}]},
+])
+def test_unhashable_option_ids_are_invalid_output(raw):
+    with pytest.raises(InvalidOutput):
+        reasoning.parse_verdict(raw, lineup_case(), {"margin"})
+    (outcome,) = reasoning.review([lineup_case()], Scripted(raw, read=["margin"]), state())
+    assert outcome.status == "invalid_output"
+
+
 # --- caps ------------------------------------------------------------------
 
 def test_call_and_cost_caps():
@@ -287,6 +314,19 @@ def test_applied_waiver_claim_replaces_no_action():
     assert len(out) == 1 and out[0]["decision"] == "notify" and out[0]["confidence"] == "medium"
     assert out[0]["payload"]["reasoned_actions"] == [{"type": "waiver_claim", "add_id": 9, "drop_id": 4}]
     assert {e["key"] for e in ev[0]} == {"deltas", "player:9"}
+
+
+def test_applied_swap_rewrites_stored_lineup():
+    (outcome,) = reasoning.review([lineup_case()], OfflineModel(), state())
+    payload = {"assignment": {"1": "WR", "2": "WR", "3": "Bench", "4": "Bench"}, "moves": []}
+    records = [{"kind": "lineup", "decision": "info", "summary": "Lineup.", "payload": payload}]
+    (out,), _ = reasoning.apply(records, [[]], [outcome])
+    assert out["payload"]["assignment"] == {"1": "Bench", "2": "WR", "3": "WR", "4": "Bench"}
+    assert out["payload"]["moves"] == [
+        {"player_id": 3, "name": "P3", "from": "Bench", "to": "WR"},
+        {"player_id": 1, "name": "P1", "from": "WR", "to": "Bench"},
+    ]
+    assert payload["assignment"]["1"] == "WR"
 
 
 def test_flat_interest_near_miss_abstains():
