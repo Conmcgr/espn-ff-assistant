@@ -11,7 +11,7 @@ from typing import Any
 from psycopg import Error, IsolationLevel
 from requests import RequestException
 
-from . import engine, notifications
+from . import engine, notifications, opportunities
 from .config import ConfigurationError, Settings
 from .database import connection
 from .espn_client import FetchResult
@@ -49,6 +49,7 @@ class WorkerResult:
     observed_at: str | None = None
     views: dict[str, str] = field(default_factory=dict)
     decisions: dict[str, dict[str, int]] = field(default_factory=dict)
+    opportunities: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     outbox: list[dict[str, Any]] = field(default_factory=list)
 
@@ -281,6 +282,14 @@ def run_once(settings: Settings, scope: WorkerScope, raw_root: Path = Path("data
                 result.views, _ = _check_views(sync.fetches, scope, evaluated_at)
                 result.status, result.error = "SYNC_FAILED", "required_views_expired"
                 return result
+            result.opportunities = opportunities.record_scan(
+                repo, league, scope.season, scope.scoring_period, sync_id, observed,
+            )
+        evaluated_at = now or datetime.now(UTC)
+        if evaluated_at - observed > MAX_INPUT_AGE:
+            result.views, _ = _check_views(sync.fetches, scope, evaluated_at)
+            result.status, result.error = "SYNC_FAILED", "required_views_expired"
+            return result
         if outbox:
             with connection() as conn:
                 conn.isolation_level = IsolationLevel.READ_COMMITTED
