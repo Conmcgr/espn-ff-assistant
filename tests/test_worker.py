@@ -464,3 +464,32 @@ def test_pending_drop_becomes_executed(synthetic_ledger, payloads):
         later = record_scan(repo, league, SCOPE.season, SCOPE.scoring_period,
                             later_sync, datetime.now(UTC))
         assert later["counts"] == {"new": 0, "changed": 0, "unchanged": 2, "expired": 0}
+
+
+def test_enrichment_attaches_to_ledger_opportunities(synthetic_ledger):
+    from test_enrichment import NOW, FakeSources
+
+    from espn_ff_assistant.enrichment import SourceBatch, enrich
+
+    league, sync = synthetic_ledger()
+    now = datetime.now(UTC)
+    with connection() as conn:
+        repo = Repository(conn, player_sync_id=sync)
+        record_scan(repo, league, SCOPE.season, SCOPE.scoring_period, sync, now)
+        assert repo.active_opportunities(league, SCOPE.season, now - timedelta(seconds=1)) == []
+        live = repo.active_opportunities(league, SCOPE.season, now)
+        assert [o.kind for _, o in live] == ["starter_out"]
+        (opportunity_id, opportunity), = live
+        sources = FakeSources()
+        sources.players = lambda wanted: SourceBatch("present", [{
+            "espn_id": str(opportunity.provider_player_id), "gsis_id": "00-0000101",
+            "pfr_id": "SyntA00"}])
+        result = enrich(live, sources, 2026, 11, NOW)
+        run = repo.insert_enrichment_run(league, SCOPE.season, now, result.sources)
+        for signal in result.signals[opportunity_id]:
+            repo.insert_opportunity_signal(run, opportunity_id, signal)
+        repo.insert_opportunity_signal(run, opportunity_id, result.signals[opportunity_id][0])
+        stored = repo.opportunity_signals(run)
+    assert [(oid, s.kind) for oid, s in stored] == [
+        (opportunity_id, "injury"), (opportunity_id, "usage")]
+    assert [s for _, s in stored] == result.signals[opportunity_id]
