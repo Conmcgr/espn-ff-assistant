@@ -1,3 +1,27 @@
+# Explicit trade grading (T1)
+
+`trades.grade_trade` (`trades-1`) is pure logic over synthetic/provider-supplied
+`PoolPlayer` inputs; `scripts/grade_trade.py --fixture <json> [--json]` runs it
+without credentials. It rejects ownership, locked-player, deadline, size, and
+position-limit violations before computing value. User overflow from receiving
+extra players can assume least-cost non-IR, unprotected, unlocked drops;
+partner overflow requires explicit drops. The size limit counts all rostered
+players, including IR. IR transfers are allowed and noted.
+
+Both sides receive optimal-lineup next-week and ROS deltas, with greedy
+free-agent fills on both baseline and post-trade rosters (ROS first, next-week
+as tiebreaker). Fills are independent counterfactuals, not acquisition guarantees;
+only immediately available free agents qualify. Fills and alternatives reuse
+the waiver candidate shortlist (top ROS and per-position next-week candidates).
+Fills take the best marginal ROS/next-week gain per vacancy and stop at no
+positive gain; auto-drop combinations are searched exactly. The best single no-trade
+add/drop alternative and trade gain net of it are reported separately. Grades
+use expected ROS gain, not alternative-adjusted gain. Independent per-player
+ROS contribution-change uncertainty is combined in quadrature, with larger
+placeholder CVs for injuries; it is not subtracted from expected gain. A gain
+within one SD or two points is a toss-up. These are uncalibrated estimates,
+not win probabilities; partner value is explicitly not acceptance probability.
+
 # Recommendation Engine — Implementation Handoff
 
 _Written September 27, 2026 (2026 season, after week 3). Covers roadmap item
