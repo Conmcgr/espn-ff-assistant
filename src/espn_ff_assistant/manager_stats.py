@@ -379,7 +379,7 @@ def build_ownership_intervals(conn: Any, league_id: str) -> int:
                    MAX(rs.scoring_period) AS end_week,
                    MIN(re.acquisition_type) AS acquisition_type
             FROM roster_entries re
-            JOIN roster_snapshots rs ON rs.id=re.roster_snapshot_id
+            JOIN latest_roster_snapshots rs ON rs.id=re.roster_snapshot_id
             WHERE rs.league_season_id=%s
             GROUP BY rs.provider_team_id, re.provider_player_id
             """,

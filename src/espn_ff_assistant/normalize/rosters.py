@@ -16,7 +16,7 @@ def players(data: dict[str, Any]) -> list[dict[str, Any]]:
     seen: set[int] = set()
     rows = []
     for team in data.get("teams", []):
-        for entry in (team.get("roster") or {}).get("entries", []):
+        for entry in (team.get("roster") or {}).get("entries") or []:
             pid = entry.get("playerId")
             if pid is None or pid in seen:
                 continue
@@ -40,7 +40,7 @@ def roster_snapshots(season: int, period: int, data: dict[str, Any]) -> list[dic
     rows = []
     for team in data.get("teams", []):
         tid = team.get("id")
-        if tid is None:
+        if tid is None or not isinstance((team.get("roster") or {}).get("entries"), list):
             continue
         rows.append(
             {
@@ -54,14 +54,14 @@ def roster_snapshots(season: int, period: int, data: dict[str, Any]) -> list[dic
 
 def roster_entries(
     season: int, period: int, data: dict[str, Any]
-) -> list[tuple[int, int, int, str | None, float | None]]:
+) -> list[tuple[int, int, int | None, str | None, float | None]]:
     """Extract roster entry tuples (team_id, player_id, slot, acq_type, stat_total)."""
     rows = []
     for team in data.get("teams", []):
         tid = team.get("id")
         if tid is None:
             continue
-        for entry in (team.get("roster") or {}).get("entries", []):
+        for entry in (team.get("roster") or {}).get("entries") or []:
             pid = entry.get("playerId")
             if pid is None:
                 continue
