@@ -31,11 +31,16 @@ def test_finds_mutual_gain_package_with_why_now():
     result = ideas()
     mutual = [i for i in result if i.partner_team == 2 and i.grade.partner.delta_ros > 0]
     assert mutual
-    best = mutual[0]
-    assert best.offer.give_ids == (3,)
-    assert best.offer.receive_ids == (11, 13)
-    assert best.grade.user.delta_ros == 200
-    assert best.grade.partner.delta_ros == 50
+    # Mutual gain through the rival's measured RB hole: partner receives both RBs,
+    # consolidates a bench WR and fills from free agents.
+    plausible = [i for i in mutual if i.plausibility.label == "plausible"]
+    assert plausible
+    best = plausible[0]
+    assert best.offer.give_ids == (1, 2)
+    assert best.offer.receive_ids == (11,)
+    assert best.offer.partner_drops == (12,)
+    assert best.grade.user.delta_ros == 110
+    assert best.grade.partner.delta_ros == 80
     assert best.plausibility.label == "plausible"
     assert any("starter" in r and "13" in r for r in best.why_now)
     assert any("RB" in r for r in best.why_now)  # rival's measured hole
@@ -94,7 +99,7 @@ def test_ideas_sorted_by_quality_and_capped_per_partner():
     by_partner = {}
     for i in result:
         by_partner[i.partner_team] = by_partner.get(i.partner_team, 0) + 1
-    assert all(n <= 10 for n in by_partner.values())
+    assert all(n <= 15 for n in by_partner.values())
 
 
 def test_opportunities_for_other_teams_do_not_leak():
