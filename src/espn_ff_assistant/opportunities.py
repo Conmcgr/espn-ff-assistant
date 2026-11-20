@@ -6,6 +6,7 @@ INJURY_RESERVE qualify; starter opportunities end at the scheduled kickoff.
 """
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -89,6 +90,11 @@ def diff(
         new = current.get(key)
         if old and old[1]:
             continue
+        if old and new and new.kind == "player_dropped":
+            attrs = dict(new.attrs)
+            if attrs.get("waiver_clear_at") is None:
+                attrs["waiver_clear_at"] = old[0].attrs.get("waiver_clear_at")
+            new = replace(new, expires_at=max(old[0].expires_at, new.expires_at), attrs=attrs)
         if old and (new is None or new.expires_at <= observed_at):
             changes.append((old[0], "expired"))
         elif new and new.expires_at > observed_at:

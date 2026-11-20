@@ -26,6 +26,28 @@ def test_empty_and_already_expired():
     assert diff({}, {'key': ITEM}, ITEM.expires_at) == []
 
 
+def test_drop_expiry_does_not_shorten_when_clearance_disappears():
+    clearance = NOW - timedelta(days=6)
+    status = SimpleNamespace(availability="waivers", waiver_clear_at=clearance)
+    drops = [ExecutedDrop("tx", 1, 2, NOW - timedelta(days=8))]
+    key = "player_dropped:tx:1"
+    old = candidates({1: status}, [], drops, {}, 4, NOW)[key]
+    status.availability = "free_agent"
+    status.waiver_clear_at = None
+    current = candidates({1: status}, [], drops, {}, 4, NOW)
+    assert current[key].expires_at < NOW
+    changes = diff({key: (old, None)}, current, NOW)
+    updated = replace(old, attrs={**old.attrs, "availability": "free_agent"})
+    assert changes == [(updated, "changed")]
+    assert updated.expires_at == clearance + timedelta(days=7)
+    assert diff({key: (updated, None)}, current, NOW) == [(updated, "unchanged")]
+    assert diff({key: (updated, None)}, current, updated.expires_at) == [(updated, "expired")]
+    status.waiver_clear_at = NOW
+    extended = candidates({1: status}, [], drops, {}, 4, NOW)
+    assert diff({key: (updated, None)}, extended, NOW) == [(extended[key], "changed")]
+    assert extended[key].expires_at > updated.expires_at
+
+
 def test_candidate_qualification_and_missing_data():
     status = SimpleNamespace(availability='waivers', waiver_clear_at=None,
                              pro_team_id=3, injury_status='OUT')
