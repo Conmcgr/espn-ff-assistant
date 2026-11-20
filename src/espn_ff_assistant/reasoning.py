@@ -176,13 +176,14 @@ def parse_verdict(raw: Any, case: Case, read: set[str]) -> Verdict:
     choice = raw.get("choice")
     alternatives: list[tuple[str, str]] = []
     if verdict == "recommend":
-        if choice not in ids:
+        if not isinstance(choice, str) or choice not in ids:
             raise InvalidOutput("choice must be one of the offered options")
         alts = raw.get("alternatives")
         if not isinstance(alts, list):
             raise InvalidOutput("alternatives must be a list")
         for alt in alts:
-            if (not isinstance(alt, Mapping) or alt.get("option") not in ids - {choice}
+            if (not isinstance(alt, Mapping) or not isinstance(alt.get("option"), str)
+                    or alt["option"] not in ids - {choice}
                     or not isinstance(alt.get("why_not"), str) or not alt["why_not"].strip()):
                 raise InvalidOutput("each alternative needs another option id and a reason")
             alternatives.append((alt["option"], alt["why_not"]))
