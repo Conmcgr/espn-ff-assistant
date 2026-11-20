@@ -221,18 +221,27 @@ class Repository:
     transaction boundary; call conn.commit() after any writes.
     """
 
-    def __init__(self, conn: Any) -> None:
+    def __init__(self, conn: Any, *, player_sync_id: str | None = None) -> None:
         self._conn = conn
+        self._player_sync_id = player_sync_id
 
     # ---- League helpers ----------------------------------------------------
 
-    def league_id(self, provider_league_id: int) -> str | None:
+    def league_id(self, provider_league_id: int, *, user_id: str | None = None) -> str | None:
         """Return the internal UUID for an ESPN league, or None."""
+        owner_filter = " AND user_id=%s" if user_id is not None else ""
         row = self._conn.execute(
-            "SELECT id FROM leagues WHERE provider='espn' AND provider_league_id=%s",
-            (provider_league_id,),
+            "SELECT id FROM leagues WHERE provider='espn' AND provider_league_id=%s" + owner_filter,
+            (provider_league_id, user_id) if user_id is not None else (provider_league_id,),
         ).fetchone()
         return row[0] if row else None
+
+    def completed_sync_id(self, league_id: str, run_key: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT id FROM sync_runs WHERE league_id=%s AND run_key=%s AND status='completed'",
+            (league_id, run_key),
+        ).fetchone()
+        return str(row[0]) if row else None
 
     def default_league_id(self) -> str | None:
         """Return the first ESPN league in the database."""
@@ -500,6 +509,9 @@ class Repository:
         if as_of_ts is not None:
             filters.append("retrieved_at<=%s")
             params.append(as_of_ts)
+        if self._player_sync_id is not None:
+            filters.append("sync_run_id=%s")
+            params.append(self._player_sync_id)
         rows = self._conn.execute(
             f"""SELECT DISTINCT ON (provider_player_id) provider_player_id, applied_total
                 FROM player_week_stats WHERE {" AND ".join(filters)}
@@ -569,6 +581,9 @@ class Repository:
         if as_of_ts is not None:
             filters.append("retrieved_at<=%s")
             params.append(as_of_ts)
+        if self._player_sync_id is not None:
+            filters.append("sync_run_id=%s")
+            params.append(self._player_sync_id)
         rows = self._conn.execute(
             f"""SELECT DISTINCT ON (provider_player_id)
                        provider_player_id, snapshot_period, injury_status, eligible_slots,
@@ -612,25 +627,28 @@ class Repository:
             return []
         ts_filter = "AND retrieved_at<=%s" if as_of_ts is not None else ""
         params: list[Any] = [sid, period] + ([as_of_ts] if as_of_ts is not None else [])
-        latest = self._conn.execute(
-            f"""SELECT sync_run_id FROM player_status_snapshots
-                WHERE league_season_id=%s AND snapshot_period=%s
-                  AND availability IN ('free_agent', 'waivers') {ts_filter}
-                ORDER BY retrieved_at DESC NULLS LAST LIMIT 1""",
-            params,
-        ).fetchone()
-        if not latest:
-            return []
+        sync_id = self._player_sync_id
+        if sync_id is None:
+            latest = self._conn.execute(
+                f"""SELECT sync_run_id FROM player_status_snapshots
+                    WHERE league_season_id=%s AND snapshot_period=%s
+                      AND availability IN ('free_agent', 'waivers') {ts_filter}
+                    ORDER BY retrieved_at DESC NULLS LAST LIMIT 1""",
+                params,
+            ).fetchone()
+            if not latest:
+                return []
+            sync_id = latest[0]
         rows = self._conn.execute(
-            """SELECT provider_player_id, snapshot_period, injury_status, eligible_slots,
-                      default_position_id, pro_team_id, percent_owned, percent_change,
-                      availability, on_provider_team_id, waiver_clear_at, lineup_locked,
-                      retrieved_at
-               FROM player_status_snapshots
-               WHERE league_season_id=%s AND snapshot_period=%s AND sync_run_id=%s
-                 AND availability IN ('free_agent', 'waivers')
-               ORDER BY percent_owned DESC NULLS LAST""",
-            (sid, period, latest[0]),
+            f"""SELECT provider_player_id, snapshot_period, injury_status, eligible_slots,
+                       default_position_id, pro_team_id, percent_owned, percent_change,
+                       availability, on_provider_team_id, waiver_clear_at, lineup_locked,
+                       retrieved_at
+                FROM player_status_snapshots
+                WHERE league_season_id=%s AND snapshot_period=%s
+                  {ts_filter} AND sync_run_id=%s AND availability IN ('free_agent', 'waivers')
+                ORDER BY percent_owned DESC NULLS LAST""",
+            [*params, sync_id],
         ).fetchall()
         return [self._status(r) for r in rows]
 

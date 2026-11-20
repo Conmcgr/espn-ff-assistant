@@ -84,6 +84,25 @@ unless their original archive is reloaded.
 See `docs/recommendation-engine-handoff.md` for design, calibration, and
 known gaps.
 
+### One-shot shadow worker
+
+```bash
+uv run python scripts/worker.py --league <espn_id> --user <users.id_uuid> --team <espn_team_id> --season 2026 --week 4
+```
+
+Use the configured `ESPN_LEAGUE_ID`, the existing primary user's UUID, and
+their saved team mapping for the selected season. The week must match ESPN's
+current scoring period. The worker archives the run privately and loads it
+only if all required views are usable and were retrieved within 15 minutes.
+An explicit empty transaction list or free-agent pool is valid; an absent
+list, failed request, or partial roster is not.
+
+The command prints one JSON result. `ACTIONABLE` and `NO_ACTION` both exit 0;
+sync/evaluation failures exit 1 and invalid configuration or scope exits 2.
+`alert_eligible` means the engines produced an `urgent` or `notify` decision
+from validated inputs. This command does not send alerts or save recommendations;
+the manual recommendation commands are unchanged.
+
 ## Validation
 
 Check row-level invariants after any load:
