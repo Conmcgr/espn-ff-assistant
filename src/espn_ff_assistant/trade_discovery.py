@@ -18,6 +18,7 @@ from __future__ import annotations
 import itertools
 from dataclasses import dataclass, field
 
+from .lineup import IR_SLOT
 from .trades import TradeContext, TradeGrade, TradeOffer, grade_trade
 from .waivers import PoolPlayer
 
@@ -25,7 +26,7 @@ ENGINE_VERSION = "trade-discovery-1"
 
 MAX_SIDE = 2                    # largest give or receive package
 MAX_PER_SIDE = 6                # players considered per side per partner
-MAX_IDEAS = 10                  # proposals kept per partner team
+MAX_IDEAS = 15                  # proposals kept per partner team
 MIN_QUALITY = 1.0               # minimum user ROS delta to surface
 
 # Plausibility component weights; a heuristic index, not a probability.
@@ -227,24 +228,47 @@ def discover(ctx: DiscoveryContext) -> list[TradeIdea]:
             protected_ids=ctx.protected_ids,
         )
         signals = ctx.signals.get(partner.team_id)
-        by_id = {p.pid: p for p in partner.roster}
+        user_by_id = {p.pid: p for p in ctx.user_team.roster}
         partner_ideas: list[TradeIdea] = []
         for give_ids, receive_ids in _packages(give_pool, receive_pool):
-            offer = TradeOffer(ctx.user_team.team_id, partner.team_id, give_ids, receive_ids)
-            grade = grade_trade(offer, trade_ctx)
-            # Only clear user gains surface; toss-ups carry too much uncertainty to pitch.
-            if grade.grade != "favorable" or grade.user is None:
+            offers = [TradeOffer(ctx.user_team.team_id, partner.team_id, give_ids, receive_ids)]
+            # grade_trade requires explicit partner drops for partner overflow;
+            # try the partner's droppable players when they receive extra players.
+            overflow = len(partner.roster) + len(give_ids) - len(receive_ids) - ctx.roster_size_limit
+            if overflow > 0:
+                # Partner gives more than they get on a full roster; legal only
+                # with explicit drops. Try each droppable-player combination.
+                droppable = [p.pid for p in _tradeable(partner.roster, ctx)
+                             if p.pid not in receive_ids and p.lineup.current_slot != IR_SLOT]
+                offers += [
+                    TradeOffer(ctx.user_team.team_id, partner.team_id, give_ids, receive_ids,
+                               partner_drops=tuple(sorted(drop)))
+                    for drop in itertools.combinations(droppable, overflow)
+                ]
+            best: tuple[TradeOffer, TradeGrade] | None = None
+            for offer in offers:
+                grade = grade_trade(offer, trade_ctx)
+                # Only clear user gains surface; toss-ups carry too much uncertainty to pitch.
+                if grade.grade != "favorable" or grade.user is None:
+                    continue
+                quality = grade.net_alternative_ros_gain if grade.net_alternative_ros_gain is not None else grade.user.delta_ros
+                if quality < MIN_QUALITY:
+                    continue
+                if best is None or grade.user.delta_ros > best[1].user.delta_ros:
+                    best = (offer, grade)
+            if best is None:
                 continue
+            offer, grade = best
             quality = grade.net_alternative_ros_gain if grade.net_alternative_ros_gain is not None else grade.user.delta_ros
-            if quality < MIN_QUALITY:
-                continue
-            receive_positions = sorted({by_id[pid].position for pid in receive_ids if pid in by_id})
+            # Need fit scores the positions the partner would acquire (give_ids),
+            # not the ones they give up.
+            acquire_positions = sorted({user_by_id[pid].position for pid in give_ids if pid in user_by_id})
             partner_ideas.append(TradeIdea(
                 partner_team=partner.team_id,
                 offer=offer,
                 grade=grade,
                 quality=round(quality, 2),
-                plausibility=_score_plausibility(grade, offer, receive_positions, signals, ctx),
+                plausibility=_score_plausibility(grade, offer, acquire_positions, signals, ctx),
                 why_now=_why_now(partner, ctx),
                 notes=list(grade.notes),
             ))
@@ -268,6 +292,17 @@ def summarize(ideas: list[TradeIdea]) -> str:
             f"partner ROS {grade.partner.delta_ros:+.1f}; "
             f"quality {i.quality:+.1f}, plausibility {i.plausibility.label} ({i.plausibility.score})"
         )
+        moves = []
+        if i.grade.user.assumed_drops:
+            moves.append(f"user also drops {', '.join(map(str, i.grade.user.assumed_drops))}")
+        if i.offer.partner_drops:
+            moves.append(f"partner drops {', '.join(map(str, i.offer.partner_drops))}")
+        if i.grade.user.after_fills != i.grade.user.before_fills:
+            moves.append(
+                f"free-agent fills {i.grade.user.before_fills} -> {i.grade.user.after_fills}"
+            )
+        if moves:
+            lines.append(f"  roster moves: {'; '.join(moves)}")
         if i.why_now:
             lines.append(f"  why now: {'; '.join(i.why_now)}")
         for note in i.notes:
