@@ -1,7 +1,9 @@
 # Notification outbox contract
 
 The worker's `--outbox` option saves recommendations, evidence and intents in
-one transaction. Default shadow runs do not save any of these. No transport is
+one READ COMMITTED transaction after REPEATABLE READ evaluation completes. The
+outbox transaction rechecks input freshness after acquiring the user/league lock.
+Default shadow runs do not save any of these. No transport is
 implemented. Suppressed decisions appear in the JSON audit output, not the
 outbox; their engine records remain in recommendations.
 
@@ -9,12 +11,15 @@ outbox; their engine records remain in recommendations.
 
 Only `notify` and `urgent` records may queue. Records more than 15 minutes old,
 future-dated records and expired records suppress. Unknown deadlines expire
-15 minutes after observation. Lineup intents use the earliest known kickoff in
-the scoring period (deliberately conservative, including already-started games).
-Explicit aware `payload.expires_at` deadlines are supported by the pure policy;
-waivers currently fall back to 15 minutes because a verified waiver deadline is
-not normalized. A digest at or after expiry suppresses instead of queuing stale
-advice. Thus long overnight batches are often intentionally silent.
+15 minutes after observation. Lineup intents use the earliest known kickoff among
+the pro teams of the players involved in that record's moves; unrelated games do
+not affect expiry. Waiver intents use the add player's exact `waiverProcessDate`
+(normalized as `PlayerStatus.waiver_clear_at`). The loaded synthetic mSettings
+does not contain a processing schedule; no timezone/day-of-week schedule is
+guessed from partial settings. When that player's processing date is unavailable,
+the conservative 15-minute fallback remains. Deadlines are passed separately to
+the pure policy, never injected into persisted engine payloads. A digest at or
+after expiry suppresses instead of queuing stale advice.
 
 Defaults: 22:00–09:00 America/Chicago, two immediate non-urgent sends per local
 day. Invalid settings fall back to these defaults. Quiet windows can cross
@@ -39,7 +44,7 @@ atomically claim before sending, recheck expiry, and transition
 `pending → sending → sent | failed | unknown`. `unknown` holds ambiguous provider
 results for reconciliation; do not blindly retry. Schema includes `attempts`,
 `provider_message_id`, `last_error`, and `sent_at` (initially null). Enqueuing an
-urgent escalation marks an older still-pending notify `failed` with
+urgent escalation marks an older still-pending notify `superseded` with
 `last_error='superseded_by_urgent'`; never retry that terminal intent. An already
 sending/unknown notify is left for M1 to reconcile safely.
 

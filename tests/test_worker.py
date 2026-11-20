@@ -9,6 +9,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Barrier
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -21,7 +22,7 @@ from espn_ff_assistant.loader import load_run
 from espn_ff_assistant.notifications import evaluate
 from espn_ff_assistant.repository import Repository
 from espn_ff_assistant.sync import sync_current
-from espn_ff_assistant.worker import WorkerScope, _check_views
+from espn_ff_assistant.worker import WorkerScope, _check_views, _notification_deadlines
 
 ROOT = Path(__file__).resolve().parents[1]
 SCOPE = WorkerScope(79301, "e5f5e3ae-dfa4-4b8a-a18f-a72d249d4585", 4, 2026, 4)
@@ -140,6 +141,31 @@ def test_worker_reports_missing_database_configuration(monkeypatch, capsys):
     assert "DATABASE_URL" in output["error"]
 
 
+def test_notification_deadlines_only_include_action_players():
+    now = datetime(2026, 10, 2, 18, tzinfo=UTC)
+    sunday = now + timedelta(days=2)
+    saturday = now + timedelta(days=1)
+    statuses = {
+        111: SimpleNamespace(pro_team_id=1),
+        112: SimpleNamespace(pro_team_id=2),
+        114: SimpleNamespace(waiver_clear_at=saturday),
+        115: SimpleNamespace(waiver_clear_at=None),
+    }
+    games = {1: SimpleNamespace(kickoff_at=sunday), 2: SimpleNamespace(kickoff_at=saturday),
+             3: SimpleNamespace(kickoff_at=now - timedelta(days=1))}
+    repo = SimpleNamespace(player_status=lambda *a, **kw: statuses, pro_games=lambda *a: games)
+    ctx = SimpleNamespace(repo=repo, league_id="league", season=2026, period=4, as_of_ts=now)
+    records = [
+        {"kind": "lineup", "payload": {"moves": [{"player_id": 111}]}},
+        {"kind": "lineup", "payload": {"moves": [{"player_id": 111}, {"player_id": 112}]}},
+        {"kind": "lineup", "payload": {"moves": [{"player_id": 999}]}},
+        {"kind": "waiver", "payload": {"add": {"player_id": 114}}},
+        {"kind": "waiver", "payload": {"add": {"player_id": 115}}},
+        {"kind": "waiver", "payload": {}},
+    ]
+    assert _notification_deadlines(ctx, records) == [sunday, saturday, None, saturday, None, None]
+
+
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="set TEST_DATABASE_URL for the worker smoke test")
 def test_worker_cli_shadow_round_trip(tmp_path, monkeypatch, capsys, payloads):
     """Run the CLI, archive, loader, repository, and engines; only ESPN is simulated."""
@@ -251,6 +277,10 @@ def test_outbox_sequence_and_concurrency(tmp_path, monkeypatch, capsys, payloads
         code, result = _invoke_worker(monkeypatch, capsys, user_id=user, league_id=espn_league,
                                      extra=["--outbox", "--now", now.isoformat()])
         assert code == 0, result
+        with connection() as conn:
+            repo = Repository(conn)
+            for row in result["outbox"]:
+                assert "expires_at" not in repo.recommendation(row["recommendation_id"]).payload
         with capsys.disabled():
             for row in result["outbox"]:
                 print(f"{label} | {row['kind']} | {row['disposition']} | {row['reason']}")
@@ -258,10 +288,23 @@ def test_outbox_sequence_and_concurrency(tmp_path, monkeypatch, capsys, payloads
 
     assert invoke("daytime")[0]["disposition"] == "send"
     assert invoke("retry")[0]["reason"] == "duplicate"
-    now = datetime(2026, 10, 2, 13, 55, tzinfo=UTC)
     roster = payloads["mRoster"]["teams"][0]["roster"]["entries"]
     roster[1]["playerId"] = 115
     roster[1]["playerPoolEntry"]["player"]["id"] = 115
+    assert invoke("daily cap new move")[0]["reason"] == "daily_cap"
+    now = datetime(2026, 10, 2, 13, 55, tzinfo=UTC)
+    roster[1]["playerId"] = 116
+    roster[1]["playerPoolEntry"]["player"]["id"] = 116
+    pool = payloads["kona_player_info"]["players"][0]
+    pool["player"]["id"] = 117
+    pool["waiverProcessDate"] = int((now + timedelta(days=1)).timestamp() * 1000)
+    # An unrelated Thursday game must not expire Friday/Sunday lineup moves.
+    payloads["proTeamSchedules_wl"]["settings"]["proTeams"].append({
+        "id": 3, "proGamesByScoringPeriod": {"4": [{
+            "id": 102, "homeProTeamId": 3, "awayProTeamId": 5,
+            "date": int((now - timedelta(hours=12)).timestamp() * 1000),
+        }]},
+    })
     assert invoke("quiet new move")[0]["disposition"] == "batch"
     roster[0]["playerPoolEntry"]["player"]["injuryStatus"] = "OUT"
     urgent = invoke("quiet urgent")
@@ -269,9 +312,13 @@ def test_outbox_sequence_and_concurrency(tmp_path, monkeypatch, capsys, payloads
     with connection() as conn:
         history = Repository(conn).notification_history(user, league, SCOPE.season, now)
         assert any(h["dedupe_key"] == urgent[0]["dedupe_key"] and h["urgency"] == "notify"
-                   and h["status"] == "failed" for h in history)
+                   and h["status"] == "superseded" for h in history)
     assert invoke("urgent retry")[0]["reason"] == "duplicate"
     roster[0]["lineupSlotId"], roster[1]["lineupSlotId"] = 20, 0
+    pool["player"]["id"] = 118
+    pool["waiverProcessDate"] = int((now - timedelta(minutes=1)).timestamp() * 1000)
+    expired = invoke("expired waiver")
+    assert any(r["kind"] == "waiver" and r["reason"] == "expired" for r in expired)
     payloads["kona_player_info"]["players"] = []
     with connection() as conn:
         before = len(Repository(conn).notification_history(user, league, SCOPE.season, now))
@@ -283,7 +330,8 @@ def test_outbox_sequence_and_concurrency(tmp_path, monkeypatch, capsys, payloads
         batch = engine.run_lineup(ctx)
         rec = batch.records[0]
         rec.update(decision="notify", payload={"moves": [{"player_id": 999, "from": "Bench", "to": "QB"}]})
-        choice = evaluate([rec], [], {}, now, user_id=user, league_season_id=str(league))[0]
+        choice = evaluate([rec], [], {}, now, user_id=user,
+                          league_season_id=repo.league_season_id(league, SCOPE.season))[0]
         # Unknown deadline still allows the digest five minutes from now.
         assert choice["disposition"] == "batch"
 

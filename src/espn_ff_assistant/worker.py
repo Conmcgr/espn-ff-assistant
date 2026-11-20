@@ -211,6 +211,25 @@ def _roster_matches_run(repo: Repository, league: str, scope: WorkerScope, fetch
     return observed == loaded
 
 
+def _notification_deadlines(ctx: engine._Context, records: list[dict[str, Any]]) -> list[datetime | None]:
+    statuses = ctx.repo.player_status(ctx.league_id, ctx.season, ctx.period, as_of_ts=ctx.as_of_ts)
+    games = ctx.repo.pro_games(ctx.season, ctx.period)
+    deadlines: list[datetime | None] = []
+    for rec in records:
+        if rec["kind"] == "lineup":
+            kickoffs = []
+            for move in rec["payload"].get("moves", []):
+                player = statuses.get(move["player_id"])
+                game = games.get(player.pro_team_id) if player else None
+                if game is not None and game.kickoff_at is not None:
+                    kickoffs.append(game.kickoff_at)
+            deadlines.append(min(kickoffs) if kickoffs else None)
+        else:
+            player = statuses.get((rec["payload"].get("add") or {}).get("player_id"))
+            deadlines.append(player.waiver_clear_at if player is not None else None)
+    return deadlines
+
+
 def run_once(settings: Settings, scope: WorkerScope, raw_root: Path = Path("data/raw"),
              *, outbox: bool = False, now: datetime | None = None) -> WorkerResult:
     result = WorkerResult(scope, "SCOPE_REJECTED")
@@ -238,7 +257,7 @@ def run_once(settings: Settings, scope: WorkerScope, raw_root: Path = Path("data
         load_run(sync.run_dir)
         result.status = "EVALUATION_FAILED"
         with connection() as conn:
-            conn.isolation_level = IsolationLevel.READ_COMMITTED if outbox else IsolationLevel.REPEATABLE_READ
+            conn.isolation_level = IsolationLevel.REPEATABLE_READ
             repo = Repository(conn)
             if _league_for_scope(repo, scope) != league:
                 result.status, result.error = "SCOPE_REJECTED", "mapping_changed"
@@ -255,30 +274,33 @@ def run_once(settings: Settings, scope: WorkerScope, raw_root: Path = Path("data
                 engine.run_lineup(ctx),
                 engine.run_waivers(ctx, allow_empty_pool=result.views["kona_player_info"] == "valid_empty"),
             )
+            records = [r for batch in results for r in batch.records]
+            deadlines = _notification_deadlines(ctx, records) if outbox else []
             evaluated_at = now or datetime.now(UTC)
             if evaluated_at - observed > MAX_INPUT_AGE:
                 result.views, _ = _check_views(sync.fetches, scope, evaluated_at)
                 result.status, result.error = "SYNC_FAILED", "required_views_expired"
                 return result
-            if outbox:
+        if outbox:
+            with connection() as conn:
+                conn.isolation_level = IsolationLevel.READ_COMMITTED
+                repo = Repository(conn)
                 # Serialize policy reads and cap accounting across ticks for this user.
                 repo.lock_notification_scope(scope.user_id, league)
                 evaluated_at = now or datetime.now(UTC)
                 if evaluated_at - observed > MAX_INPUT_AGE:
                     result.status, result.error = "SYNC_FAILED", "required_views_expired"
                     return result
+                if _league_for_scope(repo, scope) != league:
+                    result.status, result.error = "SCOPE_REJECTED", "mapping_changed"
+                    return result
                 history = repo.notification_history(scope.user_id, league, scope.season, evaluated_at)
-                records = [r for batch in results for r in batch.records]
-                kickoffs = [g.kickoff_at for g in repo.pro_games(scope.season, scope.scoring_period).values()
-                            if g.kickoff_at is not None]
-                if kickoffs:
-                    for rec in records:
-                        if rec["kind"] == "lineup":
-                            rec["payload"]["expires_at"] = min(kickoffs).isoformat()
                 choices = notifications.evaluate(
                     records, history, {k: p.value for k, p in repo.preferences(scope.user_id, league).items()},
-                    evaluated_at, user_id=scope.user_id, league_season_id=f"{league}:{scope.season}",
+                    evaluated_at, user_id=scope.user_id,
+                    league_season_id=repo.league_season_id(league, scope.season), deadlines=deadlines,
                 )
+                ctx.repo = repo
                 ids = [rid for batch in results for rid in engine.save(ctx, batch)]
                 for rec, rid, choice in zip(records, ids, choices, strict=True):
                     intent = repo.enqueue_notification(rid, scope.user_id, league, scope.season,
