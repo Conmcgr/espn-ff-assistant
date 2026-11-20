@@ -33,6 +33,10 @@ class EngineError(RuntimeError):
     """Raised when required state (settings, roster, identity) is missing."""
 
 
+class _MissingRosterError(EngineError):
+    """No roster was observed for this team before the cutoff."""
+
+
 @dataclass
 class EngineResult:
     records: list[dict[str, Any]]      # rows ready for Repository.save_recommendation
@@ -130,10 +134,12 @@ def _remaining_games(repo: Repository, season: int, start: int, final: int) -> d
 
 def team_players(ctx: _Context, team_id: int) -> tuple[list[PoolPlayer], dict[int, str]]:
     repo = ctx.repo
-    roster_period = repo.latest_roster_period(ctx.league_id, ctx.season, ctx.period)
-    if roster_period is None:
-        raise EngineError(f"No roster snapshot at or before {ctx.season} week {ctx.period}.")
-    entries = repo.roster_at(ctx.league_id, ctx.season, roster_period, team_id, include_players=True)
+    entries = repo.roster_as_of(ctx.league_id, ctx.season, ctx.period, team_id, ctx.as_of_ts)
+    if entries is None:
+        raise _MissingRosterError(
+            f"No roster snapshot for team {team_id} through {ctx.season} week {ctx.period} "
+            f"at or before {ctx.as_of_ts.isoformat()}; load an archived sync from that window."
+        )
     ids = [e.provider_player_id for e in entries]
     statuses = repo.player_status(ctx.league_id, ctx.season, ctx.period, ids, ctx.as_of_ts)
     projections = repo.week_projections(ctx.league_id, ctx.season, ctx.period, ids, ctx.as_of_ts)
@@ -290,7 +296,10 @@ def waiver_context(ctx: _Context, roster: list[PoolPlayer]) -> WaiverContext:
     for team in repo.teams(ctx.league_id, ctx.season):
         if team.provider_team_id == ctx.team_id:
             continue
-        players, _ = team_players(ctx, team.provider_team_id)
+        try:
+            players, _ = team_players(ctx, team.provider_team_id)
+        except _MissingRosterError:
+            continue
         floor = waiver_engine.starter_floor(
             [p.lineup for p in players], {p.pid: p.position for p in players}, ctx.slot_counts
         )

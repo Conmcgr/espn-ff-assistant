@@ -19,6 +19,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 # Run keys of live current-week syncs end with this suffix (see sync.py); only
 # those snapshots carry point-in-time injury status and ownership.
@@ -734,6 +735,72 @@ class Repository:
 
     # ---- Rosters -----------------------------------------------------------
 
+    def save_roster_snapshot(
+        self,
+        season_id: UUID,
+        period: int,
+        team_id: int,
+        sync_run_id: UUID,
+        retrieved_at: str | None,
+        raw_uri: str,
+        entries: list[tuple[int, int | None, str | None, float | None]],
+    ) -> None:
+        """Replace a single run's roster without changing any other versions."""
+        snapshot_id = self._conn.execute(
+            """INSERT INTO roster_snapshots
+                   (league_season_id, scoring_period, provider_team_id,
+                    sync_run_id, retrieved_at, raw_payload_uri)
+               VALUES (%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (league_season_id, scoring_period, provider_team_id, sync_run_id)
+               DO UPDATE SET retrieved_at=EXCLUDED.retrieved_at, raw_payload_uri=EXCLUDED.raw_payload_uri
+               RETURNING id""",
+            (season_id, period, team_id, sync_run_id, retrieved_at, raw_uri),
+        ).fetchone()[0]
+        self._conn.execute("DELETE FROM roster_entries WHERE roster_snapshot_id=%s", (snapshot_id,))
+        if entries:
+            with self._conn.cursor() as cur:
+                cur.executemany(
+                    """INSERT INTO roster_entries
+                           (roster_snapshot_id, provider_player_id,
+                            lineup_slot_id, acquisition_type, applied_stat_total)
+                       VALUES (%s,%s,%s,%s,%s)
+                       ON CONFLICT (roster_snapshot_id, provider_player_id, lineup_slot_id)
+                       DO UPDATE SET acquisition_type=EXCLUDED.acquisition_type,
+                                     applied_stat_total=EXCLUDED.applied_stat_total""",
+                    [(snapshot_id, *entry) for entry in entries],
+                )
+
+    def roster_as_of(
+        self,
+        league_id: str,
+        season: int,
+        week: int,
+        provider_team_id: int,
+        as_of_ts: datetime,
+    ) -> list[RosterEntry] | None:
+        """Latest team roster through both cutoffs, or None if none was observed."""
+        sid = self._season_id(league_id, season)
+        if not sid:
+            return None
+        rows = self._conn.execute(
+            """WITH snapshot AS (
+                   SELECT id, provider_team_id FROM roster_snapshots
+                   WHERE league_season_id=%s AND provider_team_id=%s
+                     AND scoring_period<=%s AND retrieved_at<=%s
+                   ORDER BY scoring_period DESC, retrieved_at DESC, sync_run_id DESC
+                   LIMIT 1
+               )
+               SELECT re.provider_player_id, rs.provider_team_id,
+                      re.lineup_slot_id, re.acquisition_type, re.applied_stat_total
+               FROM snapshot rs
+               LEFT JOIN roster_entries re ON rs.id=re.roster_snapshot_id
+               ORDER BY re.lineup_slot_id, re.provider_player_id""",
+            (sid, provider_team_id, week, as_of_ts),
+        ).fetchall()
+        if not rows:
+            return None
+        return self._roster_entries(rows, include_players=True)
+
     def roster_at(
         self,
         league_id: str,
@@ -742,7 +809,7 @@ class Repository:
         provider_team_id: int | None = None,
         include_players: bool = False,
     ) -> list[RosterEntry]:
-        """Roster state at a given week. Does not return data from after `week`.
+        """Latest roster version for the exact week (no retrieval-time cutoff).
 
         Pass provider_team_id to restrict to one team.
         Pass include_players=True to join player identity rows.
@@ -760,7 +827,7 @@ class Repository:
             f"""SELECT re.provider_player_id, rs.provider_team_id,
                        re.lineup_slot_id, re.acquisition_type, re.applied_stat_total
                 FROM roster_entries re
-                JOIN roster_snapshots rs ON rs.id=re.roster_snapshot_id
+                JOIN latest_roster_snapshots rs ON rs.id=re.roster_snapshot_id
                 WHERE rs.league_season_id=%s
                   AND rs.scoring_period=%s
                   {team_filter}
@@ -768,17 +835,10 @@ class Repository:
             params,
         ).fetchall()
 
-        entries = [
-            RosterEntry(
-                provider_player_id=r[0],
-                provider_team_id=r[1],
-                lineup_slot_id=r[2],
-                acquisition_type=r[3],
-                applied_stat_total=r[4],
-            )
-            for r in rows
-        ]
+        return self._roster_entries(rows, include_players)
 
+    def _roster_entries(self, rows: list[tuple], include_players: bool) -> list[RosterEntry]:
+        entries = [RosterEntry(*row) for row in rows if row[0] is not None]
         if include_players and entries:
             player_map = self.players_by_ids([e.provider_player_id for e in entries])
             for entry in entries:
