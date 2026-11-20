@@ -425,3 +425,42 @@ def test_worker_serialization_failure_rolls_back(synthetic_ledger, monkeypatch, 
         assert not repo.opportunity_scan_processed(league, SCOPE.season, sync_id)
         assert repo.latest_opportunity_observation(league, SCOPE.season) is None
         assert repo.stored_opportunities(league, SCOPE.season) == []
+
+
+def test_pending_drop_becomes_executed(synthetic_ledger, payloads):
+    transaction = {
+        "id": "synthetic-pending-drop", "status": "PENDING", "type": "ROSTER",
+        "items": [{"type": "DROP", "playerId": 114, "fromTeamId": 7}],
+    }
+    payloads["mTransactions2"]["transactions"] = [transaction]
+    league, pending_sync = synthetic_ledger()
+    with connection() as conn:
+        repo = Repository(conn, player_sync_id=pending_sync)
+        assert repo.executed_drops(league, SCOPE.season, SCOPE.scoring_period) == []
+        pending = record_scan(repo, league, SCOPE.season, SCOPE.scoring_period,
+                              pending_sync, datetime.now(UTC))
+        assert pending["counts"]["new"] == 1
+
+    processed_ms = int((datetime.now(UTC) - timedelta(hours=1)).timestamp() * 1000)
+    processed = datetime.fromtimestamp(processed_ms / 1000, UTC)
+    transaction.update(status="EXECUTED", processDate=processed_ms)
+    _, executed_sync = synthetic_ledger()
+    with connection() as conn:
+        repo = Repository(conn, player_sync_id=executed_sync)
+        drops = repo.executed_drops(league, SCOPE.season, SCOPE.scoring_period)
+        assert len(drops) == 1 and drops[0].process_date == processed
+        executed = record_scan(repo, league, SCOPE.season, SCOPE.scoring_period,
+                               executed_sync, datetime.now(UTC))
+        assert executed["counts"] == {"new": 1, "changed": 0, "unchanged": 1, "expired": 0}
+        assert any(event["kind"] == "player_dropped" and event["change"] == "new"
+                   for event in executed["events"])
+
+    transaction.pop("processDate")
+    _, later_sync = synthetic_ledger()
+    with connection() as conn:
+        repo = Repository(conn, player_sync_id=later_sync)
+        drops = repo.executed_drops(league, SCOPE.season, SCOPE.scoring_period)
+        assert drops[0].process_date == processed
+        later = record_scan(repo, league, SCOPE.season, SCOPE.scoring_period,
+                            later_sync, datetime.now(UTC))
+        assert later["counts"] == {"new": 0, "changed": 0, "unchanged": 2, "expired": 0}

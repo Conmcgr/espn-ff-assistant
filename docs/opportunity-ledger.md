@@ -6,9 +6,11 @@ All opportunity comparisons use the input observation timestamp, not the clock.
 
 Executed DROP items qualify only while the player is in the current pool. Drops
 without a process timestamp are ignored; future-dated drops are ignored. Expiry
-is seven days after processing or waiver clearance, whichever is later. Starter
-drop expiry never moves earlier if a later provider status omits waiver clearance.
-OUT (including INJURY_RESERVE) opportunities exclude bench/IR slots and byes,
+is seven days after processing or waiver clearance, whichever is later. Drop
+expiry never moves earlier if a later provider status omits waiver clearance.
+The loader fills in the process date when a pending drop executes, preserving a
+known process date if a subsequent response omits it.
+Starter OUT (including INJURY_RESERVE) opportunities exclude bench/IR slots and byes,
 require a known kickoff, and expire at kickoff or when qualification ends.
 
 Keys are terminal: once expired, the same drop or team/player/week cannot become
