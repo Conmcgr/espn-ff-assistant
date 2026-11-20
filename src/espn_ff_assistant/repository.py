@@ -212,6 +212,20 @@ class DraftPick:
 
 
 @dataclass(frozen=True)
+class Signal:
+    """External enrichment for one opportunity's player, stamped at its source time."""
+
+    kind: str
+    source: str
+    provider_player_id: int
+    source_ref: str
+    as_of: datetime
+    freshness: str
+    attrs: dict[str, Any]
+    citation_url: str | None = None
+
+
+@dataclass(frozen=True)
 class Opportunity:
     kind: str
     change_key: str
@@ -295,6 +309,50 @@ class Repository:
             (self._season_id(league_id, season),),
         ).fetchall()
         return [StoredOpportunity(Opportunity(*row[:7]), row[7]) for row in rows]
+
+    def active_opportunities(
+        self, league_id: str, season: int, as_of: datetime,
+    ) -> list[tuple[str, Opportunity]]:
+        """Opportunities first seen at or before as_of and still live then."""
+        rows = self._conn.execute(
+            """SELECT id, kind, change_key, provider_player_id, provider_team_id, source_view,
+                      expires_at, attrs FROM opportunities
+               WHERE league_season_id=%s AND first_observed_at<=%s AND expires_at>%s
+                 AND (expired_at IS NULL OR expired_at>%s)
+               ORDER BY expires_at, change_key""",
+            (self._season_id(league_id, season), as_of, as_of, as_of),
+        ).fetchall()
+        return [(str(row[0]), Opportunity(*row[1:])) for row in rows]
+
+    def insert_enrichment_run(
+        self, league_id: str, season: int, observed_at: datetime, sources: dict[str, Any],
+    ) -> str:
+        row = self._conn.execute(
+            """INSERT INTO enrichment_runs (league_season_id, observed_at, sources)
+               VALUES (%s,%s,%s) RETURNING id""",
+            (self._season_id(league_id, season), observed_at, json.dumps(sources)),
+        ).fetchone()
+        return str(row[0])
+
+    def insert_opportunity_signal(self, run_id: str, opportunity_id: str, signal: Signal) -> None:
+        s = signal
+        self._conn.execute(
+            """INSERT INTO opportunity_signals (run_id, opportunity_id, kind, source,
+                   source_ref, as_of, freshness, attrs, citation_url)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+            (run_id, opportunity_id, s.kind, s.source, s.source_ref, s.as_of, s.freshness,
+             json.dumps(s.attrs), s.citation_url),
+        )
+
+    def opportunity_signals(self, run_id: str) -> list[tuple[str, Signal]]:
+        rows = self._conn.execute(
+            """SELECT s.opportunity_id, s.kind, s.source, o.provider_player_id, s.source_ref,
+                      s.as_of, s.freshness, s.attrs, s.citation_url
+               FROM opportunity_signals s JOIN opportunities o ON o.id=s.opportunity_id
+               WHERE s.run_id=%s ORDER BY o.expires_at, o.change_key, s.kind, s.as_of DESC""",
+            (run_id,),
+        ).fetchall()
+        return [(str(row[0]), Signal(*row[1:])) for row in rows]
 
     def upsert_opportunity(
         self, league_id: str, season: int, opportunity: Opportunity, sync_id: str,
