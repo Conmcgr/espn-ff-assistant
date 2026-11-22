@@ -50,12 +50,22 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked --no-dev
-      # A failed tick alone does not fail the run; the health check below
-      # fails it on repeated failures, missed runs or stale scans.
+      # Health runs before the tick (a scheduling gap is only visible before
+      # the next heartbeat) and after it (stale scans, failure streaks).
+      # Neither a failed check nor a failed tick stops the steps after it;
+      # the last step fails the run if either check found a problem.
+      - name: Health before tick
+        id: health_before
+        continue-on-error: true
+        env:
+          HEALTH_MISSED_MINUTES: "120"
+        run: uv run --no-sync python scripts/health_check.py
       - name: Tick
         continue-on-error: true
         run: uv run --no-sync python scripts/scheduled_tick.py ${{ inputs.dry_run && '--dry-run' || '' }}
-      - name: Health
+      - name: Health after tick
+        id: health_after
+        continue-on-error: true
         env:
           HEALTH_MISSED_MINUTES: "120"
         run: uv run --no-sync python scripts/health_check.py
@@ -64,3 +74,6 @@ jobs:
         run: >-
           uv run --no-sync python scripts/prune_archive.py --archive-url "$RAW_ARCHIVE_URL"
           --league-id "$ESPN_LEAGUE_ID" --keep-days 7 --keep-latest 10
+      - name: Fail if unhealthy
+        if: steps.health_before.outcome == 'failure' || steps.health_after.outcome == 'failure'
+        run: exit 1
