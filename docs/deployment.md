@@ -4,7 +4,8 @@
 
 `.github/workflows/shadow-worker.yml` runs one tick, then the health check,
 every 15 minutes through the game windows (Thursday through Monday night,
-UTC) and hourly otherwise. Public-repo Actions minutes are free. Every run
+UTC) and every 20 minutes otherwise, so every 30-minute trigger window
+(pre-waiver, pre-lock) gets a tick. Public-repo Actions minutes are free. Every run
 fails if the health check finds missed runs (no tick for 120 min), a stale
 scan (8 h) or 3 failed ticks in a row. A failed tick on its own does not fail
 the run. GitHub emails the failure to whoever last changed the schedule.

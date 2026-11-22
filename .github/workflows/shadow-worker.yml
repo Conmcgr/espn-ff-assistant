@@ -8,8 +8,9 @@ on:
     - cron: "*/15 16-23 * * 0,4,6"   # Sunday, Thursday, Saturday afternoon/evening
     - cron: "*/15 0-6 * * 0,1,2,5"   # the night after Saturday, Sunday, Monday, Thursday
     - cron: "*/15 23 * * 1"          # Monday night pre-lock
-    # Otherwise hourly: waivers, daily drops and the six-hour refresh.
-    - cron: "7 * * * *"
+    # Otherwise every 20 minutes, so every 30-minute trigger window
+    # (pre-waiver, pre-lock) gets a tick: waivers, daily drops, the refresh.
+    - cron: "4,24,44 * * * *"
     # Daily raw-archive retention.
     - cron: "37 10 * * *"
   workflow_dispatch:
