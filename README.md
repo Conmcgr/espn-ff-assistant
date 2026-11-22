@@ -130,6 +130,20 @@ sync/evaluation failures exit 1 and invalid configuration or scope exits 2.
 from validated inputs. This command does not send alerts or save recommendations;
 the manual recommendation commands are unchanged.
 
+### Scheduled shadow worker
+
+```bash
+uv run python scripts/scheduled_tick.py --dry-run   # plan only, writes nothing
+uv run python scripts/scheduled_tick.py             # one tick: scan if due
+uv run python scripts/health_check.py               # missed/stale/failing?
+```
+
+Set `WORKER_USER_ID` and `WORKER_TEAM_ID` (and optionally `WORKER_SEASON`).
+Each tick runs the worker only when the trigger policy fires or the last scan
+is older than six hours, and records a `worker_ticks` heartbeat. Outbound
+flags must stay off. See `docs/deployment.md` for Cloud Run Jobs + Cloud
+Scheduler deployment, alerts, the runtime database role and rollback.
+
 ## Validation
 
 Check row-level invariants after any load:

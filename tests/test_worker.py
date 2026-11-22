@@ -25,7 +25,12 @@ from espn_ff_assistant.notifications import evaluate
 from espn_ff_assistant.opportunities import record_scan
 from espn_ff_assistant.repository import Repository
 from espn_ff_assistant.sync import sync_current
-from espn_ff_assistant.worker import WorkerScope, _check_views, _notification_deadlines
+from espn_ff_assistant.worker import (
+    WorkerResult,
+    WorkerScope,
+    _check_views,
+    _notification_deadlines,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 SCOPE = WorkerScope(79301, "e5f5e3ae-dfa4-4b8a-a18f-a72d249d4585", 4, 2026, 4)
@@ -626,3 +631,60 @@ def test_pending_drop_becomes_executed(synthetic_ledger, payloads):
         later = record_scan(repo, league, SCOPE.season, SCOPE.scoring_period,
                             later_sync, datetime.now(UTC))
         assert later["counts"] == {"new": 0, "changed": 0, "unchanged": 2, "expired": 0}
+
+
+def test_scheduled_tick_round_trip(synthetic_ledger, monkeypatch):
+    """Dry run, scan, hold, overlap skip and failure streak against PostgreSQL."""
+    from espn_ff_assistant import tick
+
+    league, _ = synthetic_ledger()
+    now = datetime.now(UTC)
+    monkeypatch.setattr(tick, "fetch_scoreboard", lambda season, week: FetchResult(
+        season, "scoreboard", week, "https://example.test", now.isoformat(), 200,
+        {"events": []}, "present"))
+    settings = Settings.from_env()
+    with connection() as conn:
+        user = Repository(conn).default_user_id()
+    config = tick.TickConfig(user, SCOPE.team_id, SCOPE.season)
+
+    def heartbeats():
+        with connection() as conn:
+            return Repository(conn).recent_worker_ticks(league, SCOPE.season, 10)
+
+    planned = tick.run_tick(settings, config, now=now, dry_run=True)
+    assert planned.status == "HOLD" and planned.plan.reasons == ["refresh"]
+    assert planned.worker is None and heartbeats() == []
+
+    scanned = tick.run_tick(settings, config, now=now)
+    assert scanned.status == "SCANNED" and scanned.worker.status in ("ACTIONABLE", "NO_ACTION")
+    assert scanned.scoring_period == SCOPE.scoring_period
+    # Opportunities recorded by the first scan may fire their own trigger once.
+    follow_up = tick.run_tick(settings, config, now=now + timedelta(minutes=5))
+    assert follow_up.status in ("HOLD", "SCANNED") and "refresh" not in follow_up.plan.reasons
+    held = tick.run_tick(settings, config, now=now + timedelta(minutes=10))
+    assert held.status == "HOLD" and not held.plan.scan_due
+    with connection() as conn:
+        last_scan = Repository(conn).latest_opportunity_observation(league, SCOPE.season)
+    assert tick.assess_health(now + timedelta(minutes=11), heartbeats(), last_scan) == []
+
+    with connection() as conn:
+        assert Repository(conn).try_tick_lock(league)
+        skipped = tick.run_tick(settings, config, now=now + timedelta(minutes=20))
+    assert skipped.status == "SKIPPED_OVERLAP"
+
+    def failing(settings, scope, raw_root):
+        return WorkerResult(scope, "SYNC_FAILED", error="required_views_not_ready")
+
+    later = now + timedelta(hours=7)
+    for minutes in (0, 10, 20):
+        failed = tick.run_tick(settings, config, now=later + timedelta(minutes=minutes),
+                               worker=failing)
+        assert failed.status == "SCAN_FAILED" and not failed.ok
+    ticks = heartbeats()
+    assert [t.status for t in ticks] == ["SCAN_FAILED"] * 3 + ["HOLD", follow_up.status, "SCANNED"]
+    assert ticks[-1].worker_run_id == scanned.worker.run_id
+    inputs = Path(f"data/raw/league-{SCOPE.league_id}") / ticks[-1].detail["inputs_run_id"]
+    archived = [json.loads(line)["view"] for line in (inputs / "manifest.jsonl").read_text().splitlines()]
+    assert archived == ["mStatus", "scoreboard"] and planned.inputs_run_id is None
+    assert tick.assess_health(later + timedelta(minutes=21), ticks, last_scan) == [
+        "repeated_failures"]
