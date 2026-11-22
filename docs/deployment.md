@@ -2,13 +2,14 @@
 
 ## GitHub Actions (current host)
 
-`.github/workflows/shadow-worker.yml` runs one tick, then the health check,
-every 15 minutes through the game windows (Thursday through Monday night,
-UTC) and every 20 minutes otherwise, so every 30-minute trigger window
-(pre-waiver, pre-lock) gets a tick. Public-repo Actions minutes are free. The health
-check runs before and after each tick, and the run fails if it finds missed runs (no tick for 120 min), a stale
-scan (8 h) or 3 failed ticks in a row. A failed tick on its own does not fail
-the run. GitHub emails the failure to whoever last changed the schedule.
+`.github/workflows/shadow-worker.yml` runs a health check, one tick, and a
+second health check every 15 minutes through the game windows (Thursday
+through Monday night, UTC) and every 20 minutes otherwise, so every 30-minute
+trigger window (pre-waiver, pre-lock) gets a tick. Public-repo Actions
+minutes are free. The run fails if either check finds missed runs (no tick
+for 120 min), a stale scan (8 h) or 3 failed ticks in a row. A failed tick on
+its own does not fail the run, and the daily prune runs either way. GitHub
+emails the failure to whoever last changed the schedule.
 
 The repository is public, so its run logs are public too. The tick only
 prints status lines, and GitHub masks secret values. Raw ESPN payloads go
