@@ -1,0 +1,65 @@
+name: Shadow worker
+
+# Read-only League A ticks: each run scans only when the trigger policy fires
+# or the last scan is over six hours old. Nothing is texted or written to ESPN.
+on:
+  schedule:
+    # Game windows in UTC (EST): every 15 minutes.
+    - cron: "*/15 16-23 * * 0,4,6"   # Sunday, Thursday, Saturday afternoon/evening
+    - cron: "*/15 0-6 * * 0,1,2,5"   # the night after Saturday, Sunday, Monday, Thursday
+    - cron: "*/15 23 * * 1"          # Monday night pre-lock
+    # Otherwise hourly: waivers, daily drops and the six-hour refresh.
+    - cron: "7 * * * *"
+    # Daily raw-archive retention.
+    - cron: "37 10 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Plan only; scan nothing and write nothing
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shadow-worker
+  cancel-in-progress: false
+
+env:
+  ESPN_LEAGUE_ID: ${{ secrets.ESPN_LEAGUE_ID }}
+  ESPN_S2: ${{ secrets.ESPN_S2 }}
+  ESPN_SWID: ${{ secrets.ESPN_SWID }}
+  DATABASE_URL: ${{ secrets.DATABASE_URL_RUNTIME }}
+  WORKER_USER_ID: ${{ secrets.WORKER_USER_ID }}
+  WORKER_TEAM_ID: ${{ secrets.WORKER_TEAM_ID }}
+  RAW_ARCHIVE_URL: db:///raw
+  DELIVERY_ENABLED: "false"
+  SMS_ENABLED: "false"
+  ESPN_ACTIONS_ENABLED: "false"
+
+jobs:
+  tick:
+    if: github.repository == 'Conmcgr/espn-ff-assistant'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked --no-dev
+      # A failed tick alone does not fail the run; the health check below
+      # fails it on repeated failures, missed runs or stale scans.
+      - name: Tick
+        continue-on-error: true
+        run: uv run --no-sync python scripts/scheduled_tick.py ${{ inputs.dry_run && '--dry-run' || '' }}
+      - name: Health
+        env:
+          HEALTH_MISSED_MINUTES: "120"
+        run: uv run --no-sync python scripts/health_check.py
+      - name: Prune raw archive
+        if: github.event.schedule == '37 10 * * *'
+        run: >-
+          uv run --no-sync python scripts/prune_archive.py --archive-url "$RAW_ARCHIVE_URL"
+          --league-id "$ESPN_LEAGUE_ID" --keep-days 7 --keep-latest 10

@@ -417,6 +417,28 @@ class Repository:
         ).fetchall()
         return [WorkerTick(*row) for row in rows]
 
+    # ---- Raw archive objects -----------------------------------------------
+
+    def put_raw_object(self, key: str, data: bytes) -> None:
+        self._conn.execute(
+            """INSERT INTO raw_objects (key, data) VALUES (%s, %s)
+               ON CONFLICT (key) DO UPDATE SET data=EXCLUDED.data, created_at=now()""",
+            (key, data),
+        )
+
+    def raw_object(self, key: str) -> bytes | None:
+        row = self._conn.execute("SELECT data FROM raw_objects WHERE key=%s", (key,)).fetchone()
+        return bytes(row[0]) if row else None
+
+    def raw_object_keys(self, prefix: str) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT key FROM raw_objects WHERE starts_with(key, %s) ORDER BY key", (prefix,)
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def delete_raw_object(self, key: str) -> None:
+        self._conn.execute("DELETE FROM raw_objects WHERE key=%s", (key,))
+
     # ---- League helpers ----------------------------------------------------
 
     def league_id(self, provider_league_id: int, *, user_id: str | None = None) -> str | None:
