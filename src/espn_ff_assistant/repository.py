@@ -950,6 +950,23 @@ class Repository:
 
     # ---- Rosters -----------------------------------------------------------
 
+    def demo_snapshot(
+        self, league_id: str, season: int, as_of: datetime
+    ) -> dict[str, Any] | None:
+        """Latest dated, completed live roster sync, never an undated archive."""
+        row = self._conn.execute(
+            """SELECT rs.scoring_period, rs.retrieved_at
+               FROM roster_snapshots rs
+               JOIN league_seasons ls ON ls.id=rs.league_season_id
+               JOIN sync_runs sr ON sr.id=rs.sync_run_id
+               WHERE ls.league_id=%s AND ls.season=%s
+                 AND sr.status='completed' AND sr.run_key LIKE %s
+                 AND rs.retrieved_at<=%s
+               ORDER BY rs.retrieved_at DESC, rs.scoring_period DESC LIMIT 1""",
+            (league_id, season, f"%{LIVE_RUN_SUFFIX}", as_of),
+        ).fetchone()
+        return {"week": row[0], "synced_at": row[1]} if row else None
+
     def save_roster_snapshot(
         self,
         season_id: UUID,

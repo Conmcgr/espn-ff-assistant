@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#317CFF">
+  <meta name="robots" content="noindex,nofollow">
+  <meta name="description" content="Your private, read-only fantasy football assistant.">
+  <title>Fantasy desk</title>
+  <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/icon-192.png">
+  <link rel="manifest" href="/assets/manifest.webmanifest" crossorigin="use-credentials">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <a href="#content" class="skip">Skip to recommendations</a>
+  <header class="topbar">
+    <a class="brand" href="/"><img src="/assets/icon.svg" alt="" width="32" height="32">Fantasy desk</a>
+    <span class="private">Private workspace <span aria-hidden="true">/</span> Read-only</span>
+  </header>
+  <main>
+    <div class="heading">
+      <div><p class="eyebrow" id="league">League A</p><h1>Your next move, explained.</h1>
+      <p class="subhead">A second set of eyes on your lineup, the waiver wire, and the trade market.</p></div>
+      <button id="refresh" type="button">Reload data <span aria-hidden="true">↻</span></button>
+    </div>
+    <div class="statusbar"><span id="team">Connecting to your league…</span><span id="freshness">Reading the latest saved ESPN snapshot</span></div>
+    <p class="notice" id="warning" hidden></p>
+    <nav class="tabs" aria-label="Recommendations">
+      <button data-section="lineup" aria-current="page">Lineup</button>
+      <button data-section="waivers">Waiver picks</button>
+      <button data-section="trades">Trade ideas</button>
+      <button data-section="about">How it works</button>
+    </nav>
+    <section id="content" tabindex="-1" aria-live="polite" aria-busy="true"></section>
+    <aside class="boundary"><strong>You stay in control.</strong> This page only reads league data. It cannot change a lineup, submit a claim, send a trade, or text anyone.</aside>
+  </main>
+  <footer><span>ESPN projections · Deterministic recommendations · No paid model calls</span><a href="https://app.devin.ai/sessions/cbb76162cc364e5e8bb236b417fbdd80" target="_blank" rel="noreferrer">Request changes ↗</a></footer>
+</body>
+</html>
