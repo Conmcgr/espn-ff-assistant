@@ -31,7 +31,7 @@ click. Keep the old worker serving until the replacement is ready.
 Each section runs a deduplicated background calculation. Reads run in a
 database-enforced read-only, repeatable-read transaction; no call can persist
 recommendations, send SMS, call a paid model or submit to ESPN. Calculations cache
-for five minutes from calculation start and refresh on the next visit. A failed refresh preserves the
+for five minutes from calculation completion and refresh on the next visit. A failed refresh preserves the
 previous result with a warning. No league data is written to disk or source control.
 
 Trade discovery uses the existing capped two-per-side search, reusing baseline
