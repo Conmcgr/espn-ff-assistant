@@ -69,8 +69,17 @@ def create_app(loader=load_section, *, ttl: float = 300) -> Flask:
             if entry.future is None and now >= entry.expires:
                 entry.future = pool.submit(loader, section)
             if entry.value is not None:
+                value = entry.value
+                # A cached result (including stale-while-refreshing) cannot extend
+                # ESPN's exact trade window. Never return expired offers.
+                if section == "trades":
+                    data = value["data"]
+                    deadline = data.get("deadline")
+                    if deadline is not None and time.time() >= deadline.timestamp():
+                        value = {**value, "data": {**data, "ideas": [], "notice":
+                            "Your league's trade deadline has passed. No actionable trades are shown."}}
                 return jsonify(
-                    **entry.value, refreshing=entry.future is not None,
+                    **value, refreshing=entry.future is not None,
                     refresh_failed=entry.failed,
                 )
             if entry.failed:

@@ -5,6 +5,7 @@ const refresh = document.querySelector("#refresh");
 const pending = new Map();
 let current = "lineup";
 let generation = 0;
+let deadlineTimer;
 const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const e = escapeHtml;
 const number = value => value == null ? "—" : Number(value).toFixed(1);
@@ -55,6 +56,9 @@ function tradeCard(idea) {
 }
 
 function trades(data) {
+  if (data.deadline && Date.now() >= new Date(data.deadline).getTime()) {
+    data = {...data, ideas: [], notice:"Your league's trade deadline has passed. No actionable trades are shown."};
+  }
   return heading("Trade ideas, not trade offers", "One top idea per rival. Your projected gain and the rival's incentive are shown separately.") +
     (data.deadline ? `<p class="caption">League trade deadline: ${e(date(data.deadline))}.</p>` : "") +
     (data.missing_teams.length ? `<p class="notice">Incomplete roster data: ${data.missing_teams.map(e).join(", ")}. These teams were not evaluated.</p>` : "") +
@@ -87,6 +91,13 @@ async function getSection(section) {
 }
 
 function render(section, result) {
+  clearTimeout(deadlineTimer);
+  if (section === "trades" && result.data.deadline) {
+    const remaining = new Date(result.data.deadline).getTime() - Date.now();
+    if (remaining > 0) deadlineTimer = setTimeout(() => {
+      if (current === "trades") render(section, result);
+    }, Math.min(remaining + 1, 2147483647));
+  }
   document.querySelector("#league").textContent = `League A / ${result.season} / Week ${result.week}`;
   document.querySelector("#team").textContent = result.team;
   document.querySelector("#freshness").textContent = `ESPN snapshot ${date(result.synced_at)}${result.refreshing ? " · Recalculating…" : ""}`;
@@ -101,6 +112,7 @@ function render(section, result) {
 }
 
 async function show(section) {
+  clearTimeout(deadlineTimer);
   if (!["lineup","waivers","trades","about"].includes(section)) section = "lineup";
   current = section;
   const token = ++generation;

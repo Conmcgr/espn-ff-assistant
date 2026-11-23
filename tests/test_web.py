@@ -2,7 +2,7 @@
 
 from concurrent.futures import Future
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -81,6 +81,25 @@ def test_no_write_routes_or_unbounded_work_names(client):
     assert client.get("/assets/../../.env").status_code == 404
     assert client.get("/").status_code == 200
     assert client.get("/assets/app.js").status_code == 200
+
+
+def test_cached_and_refreshing_trades_disappear_at_exact_deadline(client, monkeypatch):
+    client, pool = client
+    deadline = datetime.now(UTC) + timedelta(seconds=30)
+    clock = [deadline.timestamp() - 1]
+    monotonic = [10]
+    monkeypatch.setattr(web.time, "time", lambda: clock[0])
+    monkeypatch.setattr(web.time, "monotonic", lambda: monotonic[0])
+    client.get("/api/trades")
+    pool.jobs[0][1].set_result({"data": {"deadline": deadline, "ideas": [{"give": ["A"]}]}})
+    assert client.get("/api/trades").json["data"]["ideas"]
+    clock[0] = deadline.timestamp()
+    result = client.get("/api/trades").json
+    assert not result["data"]["ideas"]
+    assert "passed" in result["data"]["notice"]
+    monotonic[0] += 301
+    result = client.get("/api/trades").json
+    assert result["refreshing"] and not result["data"]["ideas"]
 
 
 def test_loader_enforces_read_only_and_uses_live_snapshot_week(monkeypatch):
