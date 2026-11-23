@@ -203,6 +203,8 @@ def migrated_database(monkeypatch):
 @NEEDS_DB
 def test_demo_snapshot_ignores_later_lookahead_roster(tmp_path, migrated_database):
     run = _make_run(tmp_path)
+    # Keep this module's CLI fixture as the default league before adding others.
+    load_run(run)
     run = run.rename(run.with_name(run.name + "-current"))
     for settings in run.glob("*/mSettings/response.json"):
         payload = json.loads(settings.read_text())
@@ -233,6 +235,7 @@ def test_demo_empty_pool_never_revives_an_older_candidate(tmp_path, migrated_dat
     from espn_ff_assistant.web.data import waivers_view
 
     run = _make_run(tmp_path)
+    load_run(run)
     run = run.rename(run.with_name("populated-current"))
     for settings in run.glob("*/mSettings/response.json"):
         payload = json.loads(settings.read_text())
