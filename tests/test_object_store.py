@@ -1,14 +1,23 @@
 import json
 import logging
+import os
 import shutil
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 
 from espn_ff_assistant.archive import ArchiveIntegrityError, RawArchive
+from espn_ff_assistant.database import apply_migrations
 from espn_ff_assistant.espn_client import FetchResult
-from espn_ff_assistant.object_store import GCSObjectStore, LocalObjectStore, from_url, prune_runs
+from espn_ff_assistant.object_store import (
+    GCSObjectStore,
+    LocalObjectStore,
+    PostgresObjectStore,
+    from_url,
+    prune_runs,
+)
 
 
 class FakeBlob:
@@ -49,10 +58,16 @@ class FakeClient:
         return self.instance
 
 
-@pytest.fixture(params=["local", "gcs"])
-def store(request, tmp_path):
+@pytest.fixture(params=["local", "gcs", "postgres"])
+def store(request, tmp_path, monkeypatch):
     if request.param == "local":
         return LocalObjectStore(tmp_path / "objects")
+    if request.param == "postgres":
+        if not os.getenv("TEST_DATABASE_URL"):
+            pytest.skip("set TEST_DATABASE_URL")
+        monkeypatch.setenv("DATABASE_URL", os.environ["TEST_DATABASE_URL"])
+        apply_migrations()
+        return PostgresObjectStore(f"test-{uuid4().hex}")
     return GCSObjectStore("private-synthetic", "archive", client=FakeClient())
 
 

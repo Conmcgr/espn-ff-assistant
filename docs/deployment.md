@@ -1,6 +1,38 @@
 # Deploying the shadow worker (R2)
 
-The worker runs as two Cloud Run Jobs, started by Cloud Scheduler in
+## GitHub Actions (current host)
+
+`.github/workflows/shadow-worker.yml` runs a health check, one tick, and a
+second health check every 15 minutes through the game windows (Thursday
+through Monday night, UTC) and every 20 minutes otherwise, so every 30-minute
+trigger window (pre-waiver, pre-lock) gets a tick. Public-repo Actions
+minutes are free. The run fails if either check finds missed runs (no tick
+for 120 min), a stale scan (8 h) or 3 failed ticks in a row. A failed tick on
+its own does not fail the run, and the daily prune runs either way. GitHub
+emails the failure to whoever last changed the schedule.
+
+The repository is public, so its run logs are public too. The tick only
+prints status lines, and GitHub masks secret values. Raw ESPN payloads go
+gzipped to the private `raw_objects` table (`RAW_ARCHIVE_URL=db:///raw`,
+RLS on, no Data API access), never to Actions artifacts. A daily run prunes
+raw runs older than 7 days, keeping the latest 10: a scan archives about 2 MB gzipped, so a week is roughly 100 MB of the 500 MB free database.
+
+Repository secrets ([Settings → Secrets and variables → Actions](https://github.com/Conmcgr/espn-ff-assistant/settings/secrets/actions)):
+`ESPN_LEAGUE_ID`, `ESPN_S2`, `ESPN_SWID`, `DATABASE_URL_RUNTIME` (the
+`ff_runtime` session-pooler URL), `WORKER_USER_ID`, `WORKER_TEAM_ID`.
+
+To run it by hand, use **Actions → Shadow worker → Run workflow** (tick
+`dry_run` to plan only), or `gh workflow run shadow-worker.yml -f dry_run=true`.
+To pause it, run `gh workflow disable shadow-worker.yml`. GitHub also
+disables schedules after 60 days without repository activity.
+
+GitHub can delay scheduled runs at busy times or skip them. That is fine
+while nothing is texted, but revisit the host before urgent pre-lock texts
+go live.
+
+## Cloud Run Jobs (alternative)
+
+The worker can also run as two Cloud Run Jobs, started by Cloud Scheduler in
 `America/New_York`:
 
 | Job | Schedule | Does |

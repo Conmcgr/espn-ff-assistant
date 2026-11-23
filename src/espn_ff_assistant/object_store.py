@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import os
 import tempfile
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import Protocol
+from typing import Any, Protocol
 from urllib.parse import unquote, urlsplit
 
 logger = logging.getLogger(__name__)
@@ -102,6 +105,55 @@ class GCSObjectStore:
         return f"gs://{self.bucket.name}/{self._key(key)}"
 
 
+class PostgresObjectStore:
+    """Gzipped objects in the application database's private `raw_objects` table."""
+
+    def __init__(self, prefix: str = "", connect: Callable[[], AbstractContextManager[Any]] | None = None):
+        self.prefix = prefix.strip("/")
+        if self.prefix:
+            safe_key(self.prefix)
+        self._connect = connect
+
+    def _key(self, key: str) -> str:
+        return "/".join(filter(None, (self.prefix, safe_key(key))))
+
+    @contextmanager
+    def _repository(self) -> Iterator[Any]:
+        from .database import connection
+        from .repository import Repository
+
+        with (self._connect or connection)() as conn:
+            yield Repository(conn)
+            conn.commit()
+
+    def put(self, key: str, data: bytes) -> None:
+        with self._repository() as repo:
+            repo.put_raw_object(self._key(key), gzip.compress(data, mtime=0))
+
+    def get(self, key: str) -> bytes:
+        with self._repository() as repo:
+            data = repo.raw_object(self._key(key))
+        if data is None:
+            raise FileNotFoundError(key)
+        return gzip.decompress(data)
+
+    def exists(self, key: str) -> bool:
+        with self._repository() as repo:
+            return repo.raw_object(self._key(key)) is not None
+
+    def list(self, prefix: str) -> list[str]:
+        offset = len(self.prefix) + 1 if self.prefix else 0
+        with self._repository() as repo:
+            return [key[offset:] for key in repo.raw_object_keys(self._key(prefix))]
+
+    def delete(self, key: str) -> None:
+        with self._repository() as repo:
+            repo.delete_raw_object(self._key(key))
+
+    def uri(self, key: str) -> str:
+        return f"db:///{self._key(key)}"
+
+
 def from_url(url: str) -> ObjectStore:
     parsed = urlsplit(url)
     if parsed.query or parsed.fragment or parsed.username or parsed.password:
@@ -110,7 +162,9 @@ def from_url(url: str) -> ObjectStore:
         return GCSObjectStore(parsed.netloc, parsed.path)
     if parsed.scheme == "file" and not parsed.netloc and parsed.path.startswith("/"):
         return LocalObjectStore(Path(unquote(parsed.path)))
-    raise ValueError("Archive URL must be gs://bucket/prefix or file:///absolute/path")
+    if parsed.scheme == "db" and not parsed.netloc:
+        return PostgresObjectStore(unquote(parsed.path))
+    raise ValueError("Archive URL must be gs://bucket/prefix, file:///absolute/path or db:///prefix")
 
 
 def prune_runs(store: ObjectStore, league_id: int | str, *, keep_days: int, keep_latest: int, now: datetime, dry_run: bool = False) -> list[str]:

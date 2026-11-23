@@ -141,7 +141,7 @@ uv run python scripts/health_check.py               # missed/stale/failing?
 Set `WORKER_USER_ID` and `WORKER_TEAM_ID` (and optionally `WORKER_SEASON`).
 Each tick runs the worker only when the trigger policy fires or the last scan
 is older than six hours, and records a `worker_ticks` heartbeat. Outbound
-flags must stay off. See `docs/deployment.md` for Cloud Run Jobs + Cloud
+flags must stay off. It runs on GitHub Actions (`.github/workflows/shadow-worker.yml`). See `docs/deployment.md` for that, Cloud Run Jobs + Cloud
 Scheduler deployment, alerts, the runtime database role and rollback.
 
 ## Validation
