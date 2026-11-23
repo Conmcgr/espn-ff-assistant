@@ -11,12 +11,13 @@ pooler URL, `DEMO_LEAGUE_ID` to the provider league ID, and `DEMO_SEASON` to the
 season. Then:
 
 ```sh
-uv run gunicorn 'espn_ff_assistant.web.app:create_app()' --bind 0.0.0.0:8080 --workers 1 --threads 4 --timeout 120
+uv run gunicorn 'espn_ff_assistant.web.app:create_app()' --bind 127.0.0.1:8080 --workers 1 --threads 4 --timeout 120
 ```
 
 **Host only behind an authenticating proxy.** The deployed Devin App uses Devin
 organization sign-in; the WSGI app deliberately does not invent its own password
-system. Do not expose the local port or deploy it to an unprotected public host.
+system. Keep the server bound to loopback so direct network clients cannot bypass
+the proxy. Do not expose the local port or deploy it to an unprotected public host.
 Devin App visits wake the managing session, but archiving/ending that session
 takes it offline. There is no Vercel project or billable service provisioned here.
 
