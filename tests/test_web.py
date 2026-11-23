@@ -93,9 +93,10 @@ def test_loader_enforces_read_only_and_uses_live_snapshot_week(monkeypatch):
         yield conn
 
     class Repo:
-        def __init__(self, c):
+        def __init__(self, c, *, player_sync_id=None):
             assert c.read_only
             assert c.isolation_level == data.psycopg.IsolationLevel.REPEATABLE_READ
+            self.sync_id = player_sync_id
 
         def default_user_id(self):
             return "local-user"
@@ -106,7 +107,8 @@ def test_loader_enforces_read_only_and_uses_live_snapshot_week(monkeypatch):
 
         def demo_snapshot(self, league, season, as_of):
             assert (league, season) == ("scoped-league", 2026)
-            return {"week": 11, "synced_at": now}
+            return {"week": 11, "synced_at": now, "sync_id": "fresh-empty-sync",
+                    "pool_observed": True}
 
         def teams(self, *args):
             return [SimpleNamespace(provider_team_id=2, name="Test team")]
@@ -115,13 +117,30 @@ def test_loader_enforces_read_only_and_uses_live_snapshot_week(monkeypatch):
     monkeypatch.setenv("DEMO_SEASON", "2026")
     monkeypatch.setattr(data, "connection", connection)
     monkeypatch.setattr(data, "Repository", Repo)
-    monkeypatch.setattr(data.engine, "context", lambda repo, league, user, season, week, now:
-                        calls.append((league, user, season, week)) or SimpleNamespace(team_id=2))
+    def context(repo, league, user, season, week, now):
+        assert repo.sync_id == "fresh-empty-sync"
+        calls.append((league, user, season, week))
+        return SimpleNamespace(team_id=2)
+
+    monkeypatch.setattr(data.engine, "context", context)
     monkeypatch.setattr(data, "lineup_view", lambda ctx: {"rows": []})
     result = data.load_section("lineup")
     assert calls == [("scoped-league", "local-user", 2026, 11)]
     assert result["synced_at"] == now
     assert result["team"] == "Test team"
+    assert "sync_id" not in result  # Internal database IDs never reach the browser.
+
+
+def test_waivers_accept_empty_pinned_pool(monkeypatch):
+    def run(ctx, *, allow_empty_pool=False):
+        assert allow_empty_pool
+        return SimpleNamespace(records=[{"decision": "no_action", "summary": "No move."}],
+                               detail=[], players=[])
+
+    monkeypatch.setattr(data.engine, "run_waivers", run)
+    result = data.waivers_view(SimpleNamespace())
+    assert result["picks"] == []
+    assert result["no_action"] == "No move."
 
 
 def test_unknown_deadline_withholds_trades_without_running_search(monkeypatch):

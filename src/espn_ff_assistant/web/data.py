@@ -50,7 +50,9 @@ def lineup_view(ctx: engine._Context) -> dict[str, Any]:
 
 
 def waivers_view(ctx: engine._Context) -> dict[str, Any]:
-    result = engine.run_waivers(ctx)
+    # load_section requires an observed pool and pins reads to that exact sync.
+    # No rows in an observed pool must not revive an older populated snapshot.
+    result = engine.run_waivers(ctx, allow_empty_pool=True)
     return {
         "picks": [r for r in result.records if r["decision"] in {"notify", "urgent"}],
         "other": [r for r in result.records if r["decision"] == "suppressed"],
@@ -159,11 +161,15 @@ def load_section(section: str) -> dict[str, Any]:
         snapshot = repo.demo_snapshot(league_id, season, now)
         if snapshot is None:
             raise engine.EngineError("No completed live snapshot is available.")
+        if section in {"waivers", "trades"} and not snapshot["pool_observed"]:
+            raise engine.EngineError("No pool was observed in the selected sync.")
+        repo = Repository(conn, player_sync_id=snapshot["sync_id"])
         ctx = engine.context(repo, league_id, user_id, season, snapshot["week"], now)
         team = next((t.name for t in repo.teams(league_id, season)
                      if t.provider_team_id == ctx.team_id), None)
         loaders = {"lineup": lineup_view, "waivers": waivers_view, "trades": trades_view}
         return {
-            "season": season, **snapshot, "team": team or "Your team",
+            "season": season, "week": snapshot["week"], "synced_at": snapshot["synced_at"],
+            "team": team or "Your team",
             "calculated_at": now, "data": loaders[section](ctx),
         }

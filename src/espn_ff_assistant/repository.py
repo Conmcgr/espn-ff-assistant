@@ -955,7 +955,13 @@ class Repository:
     ) -> dict[str, Any] | None:
         """Current week from the latest live sync, excluding its look-ahead rosters."""
         row = self._conn.execute(
-            """SELECT rs.scoring_period, rs.retrieved_at
+            """SELECT rs.scoring_period, rs.retrieved_at, rs.sync_run_id,
+                      EXISTS (
+                          SELECT 1 FROM raw_payloads pool WHERE pool.sync_run_id=sr.id
+                            AND pool.season=ls.season AND pool.view_name='kona_player_info'
+                            AND pool.scoring_period=rs.scoring_period
+                            AND pool.transport_state='present' AND pool.retrieved_at<=%s
+                      )
                FROM roster_snapshots rs
                JOIN league_seasons ls ON ls.id=rs.league_season_id
                JOIN sync_runs sr ON sr.id=rs.sync_run_id
@@ -969,9 +975,10 @@ class Repository:
                        AND rp.transport_state='present' AND rp.retrieved_at<=%s
                  )
                ORDER BY rs.retrieved_at DESC, rs.scoring_period DESC LIMIT 1""",
-            (league_id, season, f"%{LIVE_RUN_SUFFIX}", as_of, as_of),
+            (as_of, league_id, season, f"%{LIVE_RUN_SUFFIX}", as_of, as_of),
         ).fetchone()
-        return {"week": row[0], "synced_at": row[1]} if row else None
+        return {"week": row[0], "synced_at": row[1], "sync_id": str(row[2]),
+                "pool_observed": row[3]} if row else None
 
     def save_roster_snapshot(
         self,
@@ -1020,11 +1027,16 @@ class Repository:
         sid = self._season_id(league_id, season)
         if not sid:
             return None
+        sync_filter = "AND sync_run_id=%s" if self._player_sync_id is not None else ""
+        params = [sid, provider_team_id, week, as_of_ts]
+        if self._player_sync_id is not None:
+            params.append(self._player_sync_id)
         rows = self._conn.execute(
-            """WITH snapshot AS (
+            f"""WITH snapshot AS (
                    SELECT id, provider_team_id FROM roster_snapshots
                    WHERE league_season_id=%s AND provider_team_id=%s
                      AND scoring_period<=%s AND retrieved_at<=%s
+                     {sync_filter}
                    ORDER BY scoring_period DESC, retrieved_at DESC, sync_run_id DESC
                    LIMIT 1
                )
@@ -1033,7 +1045,7 @@ class Repository:
                FROM snapshot rs
                LEFT JOIN roster_entries re ON rs.id=re.roster_snapshot_id
                ORDER BY re.lineup_slot_id, re.provider_player_id""",
-            (sid, provider_team_id, week, as_of_ts),
+            params,
         ).fetchall()
         if not rows:
             return None
