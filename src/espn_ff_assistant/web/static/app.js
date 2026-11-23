@@ -93,6 +93,9 @@ async function getSection(section) {
 }
 
 function render(section, result) {
+  const selectedRival = content.querySelector("#partner-filter")?.value || "";
+  const expandedRivals = new Set([...content.querySelectorAll("[data-partner]")]
+    .filter(card => card.querySelector("details")?.open).map(card => card.dataset.partner));
   clearTimeout(deadlineTimer);
   if (section === "trades" && result.data.deadline) {
     const remaining = new Date(result.data.deadline).getTime() - Date.now();
@@ -110,7 +113,17 @@ function render(section, result) {
   content.innerHTML = ({lineup,waivers,trades})[section](result.data);
   content.setAttribute("aria-busy", "false");
   const filter = document.querySelector("#partner-filter");
-  if (filter) filter.addEventListener("change", () => document.querySelectorAll("[data-partner]").forEach(card => { card.hidden = !!filter.value && card.dataset.partner !== filter.value; }));
+  if (filter) {
+    filter.value = [...filter.options].some(option => option.value === selectedRival) ? selectedRival : "";
+    const filterCards = () => content.querySelectorAll("[data-partner]").forEach(card => {
+      card.hidden = !!filter.value && card.dataset.partner !== filter.value;
+    });
+    filter.addEventListener("change", filterCards);
+    filterCards();
+    content.querySelectorAll("[data-partner]").forEach(card => {
+      card.querySelector("details").open = expandedRivals.has(card.dataset.partner);
+    });
+  }
 }
 
 async function show(section) {
