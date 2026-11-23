@@ -31,7 +31,8 @@ def create_app(loader=load_section, *, ttl: float = 300, prewarm: bool = False) 
     cache: dict[str, Entry] = {}
     lock = Lock()
     if prewarm:
-        cache = {section: Entry(future=pool.submit(loader, section)) for section in SECTIONS}
+        cache = {section: Entry(future=pool.submit(loader, section), expires=time.monotonic() + ttl)
+                 for section in SECTIONS}
 
     @app.after_request
     def private_response(response):
@@ -61,7 +62,6 @@ def create_app(loader=load_section, *, ttl: float = 300, prewarm: bool = False) 
                 try:
                     entry.value = entry.future.result()
                     entry.failed = False
-                    entry.expires = now + ttl
                 except Exception as error:
                     # Never log exception text: connection errors can contain credentials.
                     log.warning("Dashboard %s unavailable (%s)", section, type(error).__name__)
@@ -70,6 +70,9 @@ def create_app(loader=load_section, *, ttl: float = 300, prewarm: bool = False) 
                 entry.future = None
             if entry.future is None and now >= entry.expires:
                 entry.future = pool.submit(loader, section)
+                # Bound freshness from calculation start, never first access.
+                # An unread completed warmup must not gain a second TTL.
+                entry.expires = now + ttl
             if entry.value is not None:
                 value = entry.value
                 # A cached result (including stale-while-refreshing) cannot extend

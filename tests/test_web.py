@@ -65,6 +65,25 @@ def test_prewarm_readiness_requires_every_tab_and_reuses_ready_results(monkeypat
     assert len(pool.jobs) == 3
 
 
+def test_unread_prewarm_does_not_receive_a_new_cache_window_on_first_visit(monkeypatch):
+    pool = ControlledPool()
+    clock = [10]
+    monkeypatch.setattr(web.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(web, "ThreadPoolExecutor", lambda **kw: pool)
+    client = web.create_app(prewarm=True).test_client()
+    for _, future in pool.jobs:
+        future.set_result({"synced_at": "startup snapshot", "data": {}})
+    # A new sync can arrive while nobody opens the app. Refresh on the first
+    # later visit, while immediately serving the labelled previous result.
+    clock[0] += 301
+    result = client.get("/api/trades").json
+    assert result["refreshing"]
+    assert result["synced_at"] == "startup snapshot"
+    assert len(pool.jobs) == 4
+    pool.jobs[-1][1].set_result({"synced_at": "newer snapshot", "data": {}})
+    assert client.get("/api/trades").json["synced_at"] == "newer snapshot"
+
+
 def test_failed_initial_read_never_exposes_credentials(client, caplog):
     client, pool = client
     client.get("/api/waivers")
