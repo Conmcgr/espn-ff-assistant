@@ -178,6 +178,7 @@ def test_qualifying_waiver_below_ten_suppressed_options_is_visible(monkeypatch):
     ctx = SimpleNamespace(team_id=2, period=11, as_of_ts=datetime.now(UTC))
     result = data.waivers_view(ctx)
     assert [p["payload"]["add"]["player_id"] for p in result["picks"]] == [10]
+    assert "in Week 11" in result["picks"][0]["summary"]
     assert result["no_action"] is None
     assert len(result["other"]) == 9
 
