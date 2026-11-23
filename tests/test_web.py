@@ -143,6 +143,26 @@ def test_waivers_accept_empty_pinned_pool(monkeypatch):
     assert result["no_action"] == "No move."
 
 
+def test_qualifying_waiver_below_ten_suppressed_options_is_visible(monkeypatch):
+    from espn_ff_assistant.lineup import LineupPlayer
+    from espn_ff_assistant.waivers import PoolPlayer, WaiverOption
+
+    players = [PoolPlayer(LineupPlayer(pid, f"Candidate {pid}", frozenset({0}), 10),
+                          "QB", 100, 10, availability="free_agent") for pid in range(11)]
+    options = [WaiverOption(pid, None, "QB", "stash", "free_agent", 0, 1, 30 - pid,
+                            decision="notify" if pid == 10 else "suppressed") for pid in range(11)]
+    monkeypatch.setattr(data.engine, "team_players", lambda *a: ([], {}))
+    monkeypatch.setattr(data.engine, "pool_players", lambda *a: (players, {p.pid: p.lineup.name for p in players}))
+    monkeypatch.setattr(data.engine, "waiver_context", lambda *a: SimpleNamespace(
+        faab_remaining=0, comparables=[], streams_dst=False, stash_injured=False))
+    monkeypatch.setattr(data.engine.waiver_engine, "evaluate", lambda *a: options)
+    ctx = SimpleNamespace(team_id=2, period=11, as_of_ts=datetime.now(UTC))
+    result = data.waivers_view(ctx)
+    assert [p["payload"]["add"]["player_id"] for p in result["picks"]] == [10]
+    assert result["no_action"] is None
+    assert len(result["other"]) == 9
+
+
 def test_unknown_deadline_withholds_trades_without_running_search(monkeypatch):
     monkeypatch.setattr(data, "discover", lambda ctx: pytest.fail("Must not invent deadline"))
     result = data.trades_view(SimpleNamespace(settings={}))
