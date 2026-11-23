@@ -953,7 +953,7 @@ class Repository:
     def demo_snapshot(
         self, league_id: str, season: int, as_of: datetime
     ) -> dict[str, Any] | None:
-        """Latest dated, completed live roster sync, never an undated archive."""
+        """Current week from the latest live sync, excluding its look-ahead rosters."""
         row = self._conn.execute(
             """SELECT rs.scoring_period, rs.retrieved_at
                FROM roster_snapshots rs
@@ -962,8 +962,14 @@ class Repository:
                WHERE ls.league_id=%s AND ls.season=%s
                  AND sr.status='completed' AND sr.run_key LIKE %s
                  AND rs.retrieved_at<=%s
+                 AND EXISTS (
+                     SELECT 1 FROM raw_payloads rp WHERE rp.sync_run_id=sr.id
+                       AND rp.season=ls.season AND rp.view_name='mBoxscore'
+                       AND rp.scoring_period=rs.scoring_period
+                       AND rp.transport_state='present' AND rp.retrieved_at<=%s
+                 )
                ORDER BY rs.retrieved_at DESC, rs.scoring_period DESC LIMIT 1""",
-            (league_id, season, f"%{LIVE_RUN_SUFFIX}", as_of),
+            (league_id, season, f"%{LIVE_RUN_SUFFIX}", as_of, as_of),
         ).fetchone()
         return {"week": row[0], "synced_at": row[1]} if row else None
 

@@ -12,7 +12,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -197,6 +197,29 @@ def migrated_database(monkeypatch):
         conn.commit()
 
     apply_migrations()
+
+
+@NEEDS_DB
+def test_demo_snapshot_ignores_later_lookahead_roster(tmp_path, migrated_database):
+    run = _make_run(tmp_path)
+    run = run.rename(run.with_name(run.name + "-current"))
+    manifest = [json.loads(line) for line in (run / "manifest.jsonl").read_text().splitlines()]
+    # Default live sync fetches current + next week. Only mBoxscore marks current.
+    current = run / "2025/mRoster/scoring-period-01/response.json"
+    lookahead = run / "2025/mRoster/scoring-period-02/response.json"
+    lookahead.parent.mkdir(parents=True)
+    lookahead.write_text(current.read_text())
+    manifest.append({"season": 2025, "view": "mRoster", "scoring_period": 2,
+                     "raw_path": "2025/mRoster/scoring-period-02/response.json",
+                     "transport_state": "present", "retrieved_at": "2099-01-01T00:00:30Z"})
+    (run / "manifest.jsonl").write_text("\n".join(json.dumps(row) for row in manifest))
+    load_run(run)
+    with connection() as conn:
+        repo = Repository(conn)
+        snapshot = repo.demo_snapshot(repo.league_id(99999), 2025,
+                                      datetime(2099, 1, 1, 0, 1, tzinfo=UTC))
+        assert snapshot["week"] == 1
+        assert snapshot["synced_at"] == datetime(2099, 1, 1, tzinfo=UTC)
 
 
 @NEEDS_DB
