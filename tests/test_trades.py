@@ -9,7 +9,7 @@ from time import perf_counter
 import pytest
 
 from espn_ff_assistant.lineup import IR_SLOT
-from espn_ff_assistant.trades import grade_trade
+from espn_ff_assistant.trades import TradeEvaluator, grade_trade
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SPEC = importlib.util.spec_from_file_location(
@@ -20,6 +20,36 @@ SPEC.loader.exec_module(CLI)
 
 def fixture(name="even_hurts"):
     return CLI.load_fixture(json.loads((FIXTURES / f"trade_{name}.json").read_text()))
+
+
+@pytest.mark.parametrize("name", ["even_hurts", "more_raw_gains", "illegal_roster_size",
+                                 "illegal_locked", "illegal_position_limit"])
+def test_shared_trade_baselines_preserve_independent_offer_grades(name, monkeypatch):
+    from espn_ff_assistant import trades
+
+    offer, ctx = fixture(name)
+    offers = [offer, replace(offer, give_ids=tuple(p.pid for p in ctx.user_roster[:2])),
+              replace(offer, receive_ids=tuple(p.pid for p in ctx.partner_roster[:2]))]
+    expected = [grade_trade(o, ctx) for o in offers]
+    calls = []
+    original = trades._alternative
+
+    def alternative(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(trades, "_alternative", alternative)
+    evaluator = TradeEvaluator(ctx)
+    actual = [evaluator.grade(o) for o in offers]
+    assert actual == expected
+    assert len(calls) <= 1
+    # Results and the caller's context cannot mutate a captured baseline.
+    for grade in actual:
+        if grade.user:
+            grade.user.before_fills.append(-1)
+    ctx.free_agents.clear()
+    ctx.user_roster.clear()
+    assert [evaluator.grade(o) for o in offers] == expected
 
 
 def test_even_raw_value_hurts_positional_fit():

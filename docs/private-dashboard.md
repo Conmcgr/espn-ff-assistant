@@ -11,7 +11,7 @@ pooler URL, `DEMO_LEAGUE_ID` to the provider league ID, and `DEMO_SEASON` to the
 season. Then:
 
 ```sh
-uv run gunicorn 'espn_ff_assistant.web.app:create_app()' --bind 127.0.0.1:8080 --workers 1 --threads 4 --timeout 120
+uv run gunicorn 'espn_ff_assistant.web.app:create_app(prewarm=True)' --bind 127.0.0.1:8080 --workers 1 --threads 4 --timeout 120
 ```
 
 **Host only behind an authenticating proxy.** The deployed Devin App uses Devin
@@ -21,14 +21,23 @@ the proxy. Do not expose the local port or deploy it to an unprotected public ho
 Devin App visits wake the managing session, but archiving/ending that session
 takes it offline. There is no Vercel project or billable service provisioned here.
 
-Each section starts a deduplicated background calculation. Reads run in a
+Start a replacement worker on a different loopback port, then wait for
+`curl --fail http://127.0.0.1:8080/ready` to succeed before routing the authenticated
+proxy to it. The startup warmup calculates all three tabs. `/ready` returns 503
+until every tab has a cached result and 200 when ready; it contains no league data.
+This prevents an interview demo from paying the cold calculation cost on a tab
+click. Keep the old worker serving until the replacement is ready.
+
+Each section runs a deduplicated background calculation. Reads run in a
 database-enforced read-only, repeatable-read transaction; no call can persist
 recommendations, send SMS, call a paid model or submit to ESPN. Calculations cache
 for five minutes and refresh on the next visit. A failed refresh preserves the
 previous result with a warning. No league data is written to disk or source control.
 
-Trade discovery uses the existing capped two-per-side search and can take a few
-minutes on the first load. It checks ESPN's exact trade deadline, game locks,
+Trade discovery uses the existing capped two-per-side search, reusing baseline
+and roster-fill calculations within each partner's search without reducing the
+candidate set. Startup warmup, not the first tab visit, pays its cold cost.
+It checks ESPN's exact trade deadline, game locks,
 ownership and configured roster/position limits. Results are model estimates,
 not a substitute for ESPN eligibility checks. Rival fit is ordinal, not a
 probability; sample sizes and fallback sources appear in each explanation.

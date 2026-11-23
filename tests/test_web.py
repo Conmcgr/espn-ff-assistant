@@ -45,6 +45,26 @@ def test_reads_deduplicate_and_preserve_original_snapshot_time(client):
     assert "noindex" in response.headers["X-Robots-Tag"]
 
 
+def test_prewarm_readiness_requires_every_tab_and_reuses_ready_results(monkeypatch):
+    pool = ControlledPool()
+    monkeypatch.setattr(web, "ThreadPoolExecutor", lambda **kw: pool)
+    client = web.create_app(prewarm=True).test_client()
+    assert {name for name, _ in pool.jobs} == web.SECTIONS
+    assert client.get("/ready").status_code == 503
+    for name, future in pool.jobs:
+        if name != "trades":
+            future.set_result({"synced_at": "original", "data": {}})
+    assert client.get("/ready").status_code == 503
+    next(f for name, f in pool.jobs if name == "trades").set_result(
+        {"synced_at": "original", "data": {"ideas": [], "deadline": None}})
+    response = client.get("/ready")
+    assert response.status_code == 200
+    assert response.json == {"ready": True}
+    for name in web.SECTIONS:
+        assert client.get(f"/api/{name}").status_code == 200
+    assert len(pool.jobs) == 3
+
+
 def test_failed_initial_read_never_exposes_credentials(client, caplog):
     client, pool = client
     client.get("/api/waivers")

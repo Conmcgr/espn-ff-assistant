@@ -25,11 +25,13 @@ class Entry:
     failed: bool = False
 
 
-def create_app(loader=load_section, *, ttl: float = 300) -> Flask:
+def create_app(loader=load_section, *, ttl: float = 300, prewarm: bool = False) -> Flask:
     app = Flask(__name__, static_url_path="/assets")
     pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="dashboard-read")
     cache: dict[str, Entry] = {}
     lock = Lock()
+    if prewarm:
+        cache = {section: Entry(future=pool.submit(loader, section)) for section in SECTIONS}
 
     @app.after_request
     def private_response(response):
@@ -85,5 +87,13 @@ def create_app(loader=load_section, *, ttl: float = 300) -> Flask:
             if entry.failed:
                 return jsonify(error="League data is temporarily unavailable. Try again in a minute."), 503
             return jsonify(status="loading"), 202
+
+    @app.get("/ready")
+    def ready():
+        # Deploy only after all tabs have a result. This shares the API's cache,
+        # refresh handling and deadline checks; it returns no private league data.
+        statuses = [app.make_response(section_data(section)).status_code for section in SECTIONS]
+        complete = all(status == 200 for status in statuses)
+        return jsonify(ready=complete), 200 if complete else 503
 
     return app

@@ -3,6 +3,7 @@
 const content = document.querySelector("#content");
 const refresh = document.querySelector("#refresh");
 const pending = new Map();
+const latest = new Map();
 let current = "lineup";
 let generation = 0;
 let deadlineTimer;
@@ -79,6 +80,7 @@ async function getSection(section) {
       if (response.status === 202) { await new Promise(resolve => setTimeout(resolve, 2000)); continue; }
       if (!response.ok) throw new Error("League data is temporarily unavailable. Try Reload data in a minute.");
       const result = await response.json();
+      latest.set(section, result);
       if (result.refreshing) {
         if (current === section) render(section, result);
         await new Promise(resolve => setTimeout(resolve, 2000)); continue;
@@ -121,8 +123,12 @@ async function show(section) {
   });
   refresh.disabled = section === "about";
   if (section === "about") { content.innerHTML = about(); content.setAttribute("aria-busy", "false"); return; }
-  content.setAttribute("aria-busy", "true");
-  content.innerHTML = `<div class="loading"><p class="label">Reading your league</p><h3>${section === "trades" ? "Comparing legal trade packages…" : "Calculating your options…"}</h3><p>${section === "trades" ? "This can take a few minutes. You can explore your lineup and waivers while it runs; the result will be here when you return." : "Using saved ESPN projections and current roster rules. No moves are being made."}</p></div>`;
+  if (latest.has(section)) {
+    render(section, latest.get(section));
+  } else {
+    content.setAttribute("aria-busy", "true");
+    content.innerHTML = `<div class="loading"><p class="label">Reading your league</p><h3>${section === "trades" ? "Checking trade ideas…" : "Calculating your options…"}</h3><p>Using saved ESPN projections and current roster rules. No moves are being made. You can explore the other tabs while this read-only calculation finishes.</p></div>`;
+  }
   try { const result = await getSection(section); if (token === generation) render(section, result); }
   catch (error) {
     if (token !== generation) return;
