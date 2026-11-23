@@ -368,10 +368,11 @@ def run_waivers(ctx: _Context, *, allow_empty_pool: bool = False) -> EngineResul
         {"kind": "preference", "key": "streams_dst", "value": wctx.streams_dst, "source": "user_preferences"},
         {"kind": "preference", "key": "stash_injured", "value": wctx.stash_injured, "source": "user_preferences"},
     ]
-    # A high-score suppressed option must not crowd a qualifying action out
-    # of the persisted/displayed shortlist. Preserve score order within each group.
-    ranked = sorted(options, key=lambda o: o.decision not in {"notify", "urgent"})
-    for o in ranked[:MAX_STORED_WAIVER_OPTIONS]:
+    # Use one order for records and detail: close-call reasoning targets record
+    # indices from detail. Keep qualifying actions before suppressed alternatives,
+    # preserving score order within each group.
+    options.sort(key=lambda o: o.decision not in {"notify", "urgent"})
+    for o in options[:MAX_STORED_WAIVER_OPTIONS]:
         payload = option_payload(o)
         ev = list(base_evidence)
         if o.bid:

@@ -168,9 +168,10 @@ def test_qualifying_waiver_below_ten_suppressed_options_is_visible(monkeypatch):
 
     players = [PoolPlayer(LineupPlayer(pid, f"Candidate {pid}", frozenset({0}), 10),
                           "QB", 100, 10, availability="free_agent") for pid in range(11)]
-    options = [WaiverOption(pid, None, "QB", "stash", "free_agent", 0, 1, 30 - pid,
+    roster = [PoolPlayer(LineupPlayer(99, "Current QB", frozenset({0}), 9), "QB", 90, 10)]
+    options = [WaiverOption(pid, 99, "QB", "stash", "free_agent", 2.5, 8, 30 - pid,
                             decision="notify" if pid == 10 else "suppressed") for pid in range(11)]
-    monkeypatch.setattr(data.engine, "team_players", lambda *a: ([], {}))
+    monkeypatch.setattr(data.engine, "team_players", lambda *a: (roster, {99: "Current QB"}))
     monkeypatch.setattr(data.engine, "pool_players", lambda *a: (players, {p.pid: p.lineup.name for p in players}))
     monkeypatch.setattr(data.engine, "waiver_context", lambda *a: SimpleNamespace(
         faab_remaining=0, comparables=[], streams_dst=False, stash_injured=False))
@@ -181,6 +182,14 @@ def test_qualifying_waiver_below_ten_suppressed_options_is_visible(monkeypatch):
     assert "in Week 11" in result["picks"][0]["summary"]
     assert result["no_action"] is None
     assert len(result["other"]) == 9
+    engine_result = data.engine.run_waivers(ctx)
+    cases = data.engine.close_call_cases(None, engine_result, {})
+    assert cases
+    for case in cases:
+        claim = case.option("claim").action
+        record = engine_result.records[case.record_index]
+        assert record["payload"]["add"]["player_id"] == claim["add_id"]
+        assert record["payload"]["drop"]["player_id"] == claim["drop_id"]
 
 
 def test_unknown_deadline_withholds_trades_without_running_search(monkeypatch):
