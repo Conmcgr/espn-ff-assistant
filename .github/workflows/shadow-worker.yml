@@ -45,32 +45,56 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # Until the repository secrets are set, skip cleanly instead of failing
+      # (and emailing) on every scheduled run. Logs secret names only.
+      - name: Check configuration
+        id: config
+        run: |
+          missing=""
+          for pair in ESPN_LEAGUE_ID:ESPN_LEAGUE_ID ESPN_S2:ESPN_S2 ESPN_SWID:ESPN_SWID \
+                      DATABASE_URL:DATABASE_URL_RUNTIME WORKER_USER_ID:WORKER_USER_ID \
+                      WORKER_TEAM_ID:WORKER_TEAM_ID; do
+            var="${pair%%:*}"
+            [ -n "${!var}" ] || missing="$missing ${pair#*:}"
+          done
+          if [ -n "$missing" ]; then
+            echo "::notice::Shadow worker skipped; repository secrets not set:$missing"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@v4
+        if: steps.config.outputs.configured == 'true'
       - uses: astral-sh/setup-uv@v6
+        if: steps.config.outputs.configured == 'true'
         with:
           enable-cache: true
-      - run: uv sync --locked --no-dev
+      - if: steps.config.outputs.configured == 'true'
+        run: uv sync --locked --no-dev
       # Health runs before the tick (a scheduling gap is only visible before
       # the next heartbeat) and after it (stale scans, failure streaks).
       # Neither a failed check nor a failed tick stops the steps after it;
       # the last step fails the run if either check found a problem.
       - name: Health before tick
+        if: steps.config.outputs.configured == 'true'
         id: health_before
         continue-on-error: true
         env:
           HEALTH_MISSED_MINUTES: "120"
         run: uv run --no-sync python scripts/health_check.py
       - name: Tick
+        if: steps.config.outputs.configured == 'true'
         continue-on-error: true
         run: uv run --no-sync python scripts/scheduled_tick.py ${{ inputs.dry_run && '--dry-run' || '' }}
       - name: Health after tick
+        if: steps.config.outputs.configured == 'true'
         id: health_after
         continue-on-error: true
         env:
           HEALTH_MISSED_MINUTES: "120"
         run: uv run --no-sync python scripts/health_check.py
       - name: Prune raw archive
-        if: github.event.schedule == '37 10 * * *'
+        if: steps.config.outputs.configured == 'true' && github.event.schedule == '37 10 * * *'
         run: >-
           uv run --no-sync python scripts/prune_archive.py --archive-url "$RAW_ARCHIVE_URL"
           --league-id "$ESPN_LEAGUE_ID" --keep-days 7 --keep-latest 10
