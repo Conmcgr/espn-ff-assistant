@@ -19,7 +19,7 @@ import itertools
 from dataclasses import dataclass, field
 
 from .lineup import IR_SLOT
-from .trades import TradeContext, TradeGrade, TradeOffer, grade_trade
+from .trades import TradeContext, TradeEvaluator, TradeGrade, TradeOffer
 from .waivers import PoolPlayer
 
 ENGINE_VERSION = "trade-discovery-1"
@@ -227,6 +227,7 @@ def discover(ctx: DiscoveryContext) -> list[TradeIdea]:
             position_limits=dict(ctx.position_limits),
             protected_ids=ctx.protected_ids,
         )
+        evaluator = TradeEvaluator(trade_ctx)
         signals = ctx.signals.get(partner.team_id)
         user_by_id = {p.pid: p for p in ctx.user_team.roster}
         partner_ideas: list[TradeIdea] = []
@@ -247,7 +248,7 @@ def discover(ctx: DiscoveryContext) -> list[TradeIdea]:
                 ]
             best: tuple[TradeOffer, TradeGrade] | None = None
             for offer in offers:
-                grade = grade_trade(offer, trade_ctx)
+                grade = evaluator.grade(offer)
                 # Only clear user gains surface; toss-ups carry too much uncertainty to pitch.
                 if grade.grade != "favorable" or grade.user is None:
                     continue

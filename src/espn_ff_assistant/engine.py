@@ -321,7 +321,7 @@ def waiver_context(ctx: _Context, roster: list[PoolPlayer]) -> WaiverContext:
     )
 
 
-def waiver_summary(o: WaiverOption, names: dict[int, str]) -> str:
+def waiver_summary(o: WaiverOption, names: dict[int, str], *, period: int | None = None) -> str:
     verb = {"stream": "Stream", "stash": "Stash", "upgrade": "Add"}[o.kind]
     text = f"{verb} {names.get(o.add_id, o.add_id)} ({o.position})"
     if o.drop_id is not None:
@@ -330,7 +330,8 @@ def waiver_summary(o: WaiverOption, names: dict[int, str]) -> str:
         text += f", bid ${o.bid.amount} (range ${o.bid.low}–${o.bid.high})"
     elif o.availability == "free_agent":
         text += ", free agent: add now"
-    return f"{text}. {o.delta_next:+.1f} next week, {o.delta_ros:+.1f} rest of season."
+    target = f"in Week {period}" if period is not None else "next week"
+    return f"{text}. {o.delta_next:+.1f} {target}, {o.delta_ros:+.1f} rest of season."
 
 
 def run_waivers(ctx: _Context, *, allow_empty_pool: bool = False) -> EngineResult:
@@ -367,6 +368,10 @@ def run_waivers(ctx: _Context, *, allow_empty_pool: bool = False) -> EngineResul
         {"kind": "preference", "key": "streams_dst", "value": wctx.streams_dst, "source": "user_preferences"},
         {"kind": "preference", "key": "stash_injured", "value": wctx.stash_injured, "source": "user_preferences"},
     ]
+    # Use one order for records and detail: close-call reasoning targets record
+    # indices from detail. Keep qualifying actions before suppressed alternatives,
+    # preserving score order within each group.
+    options.sort(key=lambda o: o.decision not in {"notify", "urgent"})
     for o in options[:MAX_STORED_WAIVER_OPTIONS]:
         payload = option_payload(o)
         ev = list(base_evidence)
@@ -374,7 +379,8 @@ def run_waivers(ctx: _Context, *, allow_empty_pool: bool = False) -> EngineResul
             ev.append({"kind": "competitor", "key": "teams_with_need", "value": o.bid.competitors, "source": "derived"})
         records.append({
             "provider_team_id": ctx.team_id, "kind": "waiver", "scoring_period": ctx.period,
-            "as_of_ts": ctx.as_of_ts, "decision": o.decision, "summary": waiver_summary(o, names),
+            "as_of_ts": ctx.as_of_ts, "decision": o.decision,
+            "summary": waiver_summary(o, names, period=ctx.period),
             "payload": payload, "alternatives": None,
             "confidence": o.bid.confidence if o.bid else "medium",
             "engine_version": waiver_engine.ENGINE_VERSION,

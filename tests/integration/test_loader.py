@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -197,6 +198,82 @@ def migrated_database(monkeypatch):
         conn.commit()
 
     apply_migrations()
+
+
+@NEEDS_DB
+def test_demo_snapshot_ignores_later_lookahead_roster(tmp_path, migrated_database):
+    run = _make_run(tmp_path)
+    # Keep this module's CLI fixture as the default league before adding others.
+    load_run(run)
+    run = run.rename(run.with_name(run.name + "-current"))
+    for settings in run.glob("*/mSettings/response.json"):
+        payload = json.loads(settings.read_text())
+        payload["id"] = 99998
+        settings.write_text(json.dumps(payload))
+    manifest = [json.loads(line) for line in (run / "manifest.jsonl").read_text().splitlines()]
+    # Default live sync fetches current + next week. Only mBoxscore marks current.
+    current = run / "2025/mRoster/scoring-period-01/response.json"
+    lookahead = run / "2025/mRoster/scoring-period-02/response.json"
+    lookahead.parent.mkdir(parents=True)
+    lookahead.write_text(current.read_text())
+    manifest.append({"season": 2025, "view": "mRoster", "scoring_period": 2,
+                     "raw_path": "2025/mRoster/scoring-period-02/response.json",
+                     "transport_state": "present", "retrieved_at": "2099-01-01T00:00:30Z"})
+    (run / "manifest.jsonl").write_text("\n".join(json.dumps(row) for row in manifest))
+    load_run(run)
+    with connection() as conn:
+        repo = Repository(conn)
+        snapshot = repo.demo_snapshot(repo.league_id(99998), 2025,
+                                      datetime(2099, 1, 1, 0, 1, tzinfo=UTC))
+        assert snapshot["week"] == 1
+        assert snapshot["synced_at"] == datetime(2099, 1, 1, tzinfo=UTC)
+
+
+@NEEDS_DB
+def test_demo_empty_pool_never_revives_an_older_candidate(tmp_path, migrated_database):
+    from espn_ff_assistant import engine
+    from espn_ff_assistant.web.data import waivers_view
+
+    run = _make_run(tmp_path)
+    load_run(run)
+    run = run.rename(run.with_name("populated-current"))
+    for settings in run.glob("*/mSettings/response.json"):
+        payload = json.loads(settings.read_text())
+        payload["id"] = 99997
+        payload["settings"]["rosterSettings"] = {"lineupSlotCounts": {"0": 1}}
+        settings.write_text(json.dumps(payload))
+    pool = run / "2025/kona_player_info/scoring-period-01/response.json"
+    pool.parent.mkdir(parents=True)
+    pool.write_text(json.dumps({"players": [{"id": 1005, "status": "FREEAGENT", "player": {
+        "id": 1005, "fullName": "Old Candidate", "defaultPositionId": 1,
+    }}]}))
+    manifest = [json.loads(line) for line in (run / "manifest.jsonl").read_text().splitlines()]
+    manifest.append({"season": 2025, "view": "kona_player_info", "scoring_period": 1,
+                     "raw_path": pool.relative_to(run).as_posix(), "transport_state": "present",
+                     "retrieved_at": "2099-01-01T00:00:00Z"})
+    (run / "manifest.jsonl").write_text("\n".join(json.dumps(row) for row in manifest))
+    load_run(run)
+    empty = shutil.copytree(run, run.with_name("empty-current"))
+    (empty / pool.relative_to(run)).write_text('{"players": []}')
+    for row in manifest:
+        row["retrieved_at"] = "2099-01-01T00:02:00Z"
+    (empty / "manifest.jsonl").write_text("\n".join(json.dumps(row) for row in manifest))
+    load_run(empty)
+    cutoff = datetime(2099, 1, 1, 0, 3, tzinfo=UTC)
+    with connection() as conn:
+        repo = Repository(conn)
+        league = repo.league_id(99997)
+        snapshot = repo.demo_snapshot(league, 2025, cutoff)
+        assert snapshot["pool_observed"]
+        # An unpinned reader would return the old, now absent candidate.
+        assert [p.provider_player_id for p in repo.available_players(league, 2025, 1, cutoff)] == [1005]
+        pinned = Repository(conn, player_sync_id=snapshot["sync_id"])
+        assert pinned.available_players(league, 2025, 1, cutoff) == []
+        user = repo.default_user_id()
+        repo.set_user_team(user, league, 2025, 1)
+        result = waivers_view(engine.context(pinned, league, user, 2025, 1, cutoff))
+        assert not result["picks"] and not result["other"]
+        assert result["no_action"]
 
 
 @NEEDS_DB

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 from itertools import combinations
 from math import sqrt
 
@@ -197,37 +198,76 @@ def _side_value(before: list[PoolPlayer], after: list[PoolPlayer], bf: list[int]
                 af: list[int], drops: list[int], ctx: TradeContext) -> SideValue:
     bn, br = _value(before, ctx)
     an, ar = _value(after, ctx)
-    return SideValue(an - bn, ar - br, bf, af, drops)
+    return SideValue(an - bn, ar - br, list(bf), list(af), list(drops))
+
+
+class TradeEvaluator:
+    """Grade many offers against one captured context, reusing invariant baselines.
+
+    No cache crosses a discovery run or partner. Copy the mutable containers so
+    subsequent caller changes cannot invalidate already calculated baselines.
+    """
+
+    def __init__(self, ctx: TradeContext):
+        self.ctx = replace(ctx, slot_counts=dict(ctx.slot_counts),
+                           user_roster=list(ctx.user_roster), partner_roster=list(ctx.partner_roster),
+                           free_agents=list(ctx.free_agents), position_limits=dict(ctx.position_limits))
+        self._fills: dict[tuple[PoolPlayer, ...], tuple[list[PoolPlayer], list[int]]] = {}
+
+    def _filled(self, roster: list[PoolPlayer]) -> tuple[list[PoolPlayer], list[int]]:
+        key = tuple(roster)
+        if key not in self._fills:
+            self._fills[key] = _fill(roster, self.pool, self.ctx)
+        return self._fills[key]
+
+    @cached_property
+    def pool(self) -> list[PoolPlayer]:
+        ctx = self.ctx
+        occupied = {p.pid for p in [*ctx.user_roster, *ctx.partner_roster]}
+        available = sorted({p.pid: p for p in ctx.free_agents if p.pid not in occupied
+                            and p.availability == "free_agent" and not p.lineup.locked
+                            and p.lineup.current_slot != IR_SLOT}.values(), key=lambda p: p.pid)
+        return sorted(select_candidates(available), key=lambda p: p.pid)
+
+    @cached_property
+    def user_baseline(self) -> tuple[list[PoolPlayer], list[int]]:
+        return self._filled(self.ctx.user_roster)
+
+    @cached_property
+    def partner_baseline(self) -> tuple[list[PoolPlayer], list[int]]:
+        return self._filled(self.ctx.partner_roster)
+
+    @cached_property
+    def alternative(self) -> tuple[float, int | None, int | None]:
+        return _alternative(self.user_baseline[0], self.pool, self.ctx)
+
+    def grade(self, offer: TradeOffer) -> TradeGrade:
+        ctx = self.ctx
+        violations, notes = _legality(offer, ctx)
+        if violations:
+            return TradeGrade("illegal", violations, notes)
+        post_user, post_partner, assumed_drops, violations = _post_trade_rosters(offer, ctx)
+        if violations:
+            return TradeGrade("illegal", violations, notes)
+        before_user, ub = self.user_baseline
+        before_partner, pb = self.partner_baseline
+        after_user, ua = self._filled(post_user)
+        after_partner, pa = self._filled(post_partner)
+        uv = _side_value(before_user, after_user, ub, ua, assumed_drops, ctx)
+        pv = _side_value(before_partner, after_partner, pb, pa, [], ctx)
+        alternative, add_id, drop_id = self.alternative
+        sd = _uncertainty(before_user, after_user, ctx)
+        grade = "toss-up" if abs(uv.delta_ros) <= max(sd, MIN_GAIN) else (
+            "favorable" if uv.delta_ros > 0 else "unfavorable")
+        return TradeGrade(grade, notes=notes, user=uv, partner=pv, user_ros_sd=sd,
+                          alternative_ros_gain=alternative, alternative_add=add_id,
+                          alternative_drop=drop_id, net_alternative_ros_gain=uv.delta_ros - alternative)
 
 
 def grade_trade(offer: TradeOffer, ctx: TradeContext) -> TradeGrade:
-    """Grade both lineup deltas with symmetric FA access and independent ROS risk.
+    """Grade both sides with symmetric FA access and independent ROS risk.
 
-    User overflow from receiving extra players may be auto-dropped; partner
-    overflow requires explicit drops. Fills are independent counterfactuals,
-    not promises that both teams can acquire the same free agent.
+    User overflow may be auto-dropped; partner overflow requires explicit drops.
+    Fills are independent counterfactuals, not shared acquisition promises.
     """
-    violations, notes = _legality(offer, ctx)
-    if violations:
-        return TradeGrade("illegal", violations, notes)
-    post_user, post_partner, assumed_drops, violations = _post_trade_rosters(offer, ctx)
-    if violations:
-        return TradeGrade("illegal", violations, notes)
-    occupied = {p.pid for p in [*ctx.user_roster, *ctx.partner_roster]}
-    available = sorted({p.pid: p for p in ctx.free_agents if p.pid not in occupied
-                        and p.availability == "free_agent" and not p.lineup.locked
-                        and p.lineup.current_slot != IR_SLOT}.values(), key=lambda p: p.pid)
-    pool = sorted(select_candidates(available), key=lambda p: p.pid)
-    before_user, ub = _fill(ctx.user_roster, pool, ctx)
-    after_user, ua = _fill(post_user, pool, ctx)
-    before_partner, pb = _fill(ctx.partner_roster, pool, ctx)
-    after_partner, pa = _fill(post_partner, pool, ctx)
-    uv = _side_value(before_user, after_user, ub, ua, assumed_drops, ctx)
-    pv = _side_value(before_partner, after_partner, pb, pa, [], ctx)
-    alternative, add_id, drop_id = _alternative(before_user, pool, ctx)
-    sd = _uncertainty(before_user, after_user, ctx)
-    grade = "toss-up" if abs(uv.delta_ros) <= max(sd, MIN_GAIN) else (
-        "favorable" if uv.delta_ros > 0 else "unfavorable")
-    return TradeGrade(grade, notes=notes, user=uv, partner=pv, user_ros_sd=sd,
-                      alternative_ros_gain=alternative, alternative_add=add_id,
-                      alternative_drop=drop_id, net_alternative_ros_gain=uv.delta_ros - alternative)
+    return TradeEvaluator(ctx).grade(offer)
